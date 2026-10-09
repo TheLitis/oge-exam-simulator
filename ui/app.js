@@ -1,0 +1,305 @@
+import * as V from './views.js';
+const app = document.querySelector('#app');
+const modal = document.querySelector('#modal');
+let token = location.hash.slice(1) || sessionStorage.getItem('oge-key');
+if (token) { sessionStorage.setItem('oge-key', token); history.replaceState(null, '', location.pathname); }
+const state = { data: null, mode: 'home', task: null, editorTask: 1, editorCode: '', busy: false, zoom: 0, stopped: false };
+const imageUrls = new Map();
+let toastTimer, draftTimer, metaTimer, pendingDraft = null, pendingTitle = null, draftChain = Promise.resolve(), polling = false, imageGeneration = 0;
+
+function toast(message, error = false, persistent = false) {
+  const el = document.querySelector('#toast'); clearTimeout(toastTimer); el.textContent = message; el.className = 'visible' + (error ? ' error' : '');
+  if (!persistent) toastTimer = setTimeout(() => { el.className = ''; }, error ? 7500 : 4200);
+}
+async function request(route, data, upload) {
+  const options = { headers: { Authorization: `Bearer ${token}` }, cache: 'no-store' };
+  if (upload) { options.method = 'POST'; options.body = upload; options.headers['Content-Type'] = 'application/octet-stream'; }
+  else if (data !== undefined) { options.method = 'POST'; options.body = JSON.stringify(data); options.headers['Content-Type'] = 'application/json'; }
+  let response;
+  try { response = await fetch(route, options); } catch { throw new Error('Нет связи с локальным приложением. Не закрывайте страницу; повторите действие после восстановления связи.'); }
+  let body;
+  try { body = await response.json(); } catch { throw new Error('Не удалось прочитать ответ приложения.'); }
+  if (!response.ok || !body.ok) throw new Error(body.error || 'Не удалось выполнить действие.');
+  return body.value;
+}
+async function download(route, name) {
+  const response = await fetch(route, { headers: { Authorization: `Bearer ${token}` } });
+  if (!response.ok) { const b = await response.json(); throw new Error(b.error || 'Не удалось скачать файл.'); }
+  const blob = await response.blob(), url = URL.createObjectURL(blob), link = document.createElement('a');
+  link.href = url; link.download = name; document.body.append(link); link.click(); link.remove(); setTimeout(() => URL.revokeObjectURL(url), 60000);
+}
+function setBusy(value) {
+  state.busy = value; document.body.dataset.busy = String(value); app.setAttribute('aria-busy', String(value));
+  app.querySelectorAll('button,input').forEach(el => {
+    if (value) { el.dataset.disabledBeforeBusy = String(el.disabled); el.disabled = true; }
+    else if (el.dataset.disabledBeforeBusy !== undefined) { el.disabled = el.dataset.disabledBeforeBusy === 'true'; delete el.dataset.disabledBeforeBusy; }
+  });
+}
+async function run(fn, message) {
+  if (state.busy) return; setBusy(true);
+  if (message) toast(message, false, true);
+  try { await fn(); }
+  catch (e) { toast(e.message, true); }
+  finally { setBusy(false); }
+}
+function ask(title, message, confirm = 'Подтвердить', danger = false) {
+  return new Promise(resolve => {
+    if (modal.open) modal.close('cancel');
+    modal.innerHTML = `<h2 id="modal-title">${V.esc(title)}</h2><p>${V.esc(message)}</p><div class="button-row"><button class="secondary" data-choice="cancel" autofocus>Отмена</button><button class="${danger ? 'finish-button' : 'primary'}" data-choice="ok">${V.esc(confirm)}</button></div>`;
+    modal.returnValue = '';
+    modal.onclick = e => { const b = e.target.closest('[data-choice]'); if (b) modal.close(b.dataset.choice); };
+    modal.onclose = () => { resolve(modal.returnValue === 'ok'); modal.onclick = null; modal.onclose = null; };
+    modal.showModal();
+  });
+}
+function pickFiles({ accept = '', multiple = false, directory = false } = {}) {
+  return new Promise(resolve => {
+    const input = document.querySelector(directory ? '#folder-input' : '#file-input'); input.value = ''; input.accept = accept; input.multiple = multiple || directory;
+    input.onchange = () => { resolve([...input.files]); input.onchange = null; input.oncancel = null; };
+    input.oncancel = () => { resolve([]); input.onchange = null; input.oncancel = null; };
+    input.click();
+  });
+}
+const imageAccept = '.png,.jpg,.jpeg,.gif,.webp,.bmp';
+async function loadImages() {
+  const generation = ++imageGeneration;
+  for (const image of document.querySelectorAll('img[data-image-id]')) {
+    const id = image.dataset.imageId;
+    try {
+      if (!imageUrls.has(id)) {
+        const response = await fetch(`/api/asset?id=${encodeURIComponent(id)}`, { headers: { Authorization: `Bearer ${token}` } });
+        if (!response.ok) throw new Error('Изображение условия недоступно.');
+        const blob = await response.blob();
+        if (generation !== imageGeneration) return;
+        imageUrls.set(id, URL.createObjectURL(blob));
+        if (imageUrls.size > 24) { const first = imageUrls.keys().next().value; URL.revokeObjectURL(imageUrls.get(first)); imageUrls.delete(first); }
+      }
+      if (generation === imageGeneration) image.src = imageUrls.get(id);
+    } catch (e) { if (generation === imageGeneration) { image.alt = 'Не удалось загрузить условие. Обратитесь к организатору.'; toast(e.message, true); } }
+  }
+}
+function render(keepScroll = false) {
+  const oldScroll = keepScroll ? document.querySelector('#task-content')?.scrollTop || 0 : 0;
+  const s = state.data;
+  if (state.mode === 'exam' && state.task) app.innerHTML = V.exam(s, state.task);
+  else if (state.mode === 'editor') app.innerHTML = V.editor(s, state.editorTask, state.editorCode);
+  else if (state.mode === 'registration') app.innerHTML = V.registration(s);
+  else if (state.mode === 'result') app.innerHTML = V.result(s);
+  else app.innerHTML = V.home(s);
+  document.querySelector('#task-content')?.scrollTo(0, oldScroll);
+  if (state.mode === 'exam') applyZoom();
+  loadImages();
+  if (state.busy) setBusy(true);
+}
+function updateNav() {
+  const nav = document.querySelector('#task-nav');
+  if (nav && state.task) nav.innerHTML = V.nav(state.data, state.task.id);
+}
+function markDirty() {
+  if (state.mode !== 'exam') return;
+  const status = state.data.session.statuses.find(t => t.id === state.task.id); status.dirty = true; updateNav();
+  const label = document.querySelector('#answer-status'); if (label) { label.textContent = 'Черновик · нажмите «Сохранить ответ»'; label.className = 'small amber-text'; }
+}
+async function flushDraft() {
+  clearTimeout(draftTimer);
+  if (!pendingDraft) return draftChain;
+  const work = pendingDraft; pendingDraft = null;
+  draftChain = draftChain.catch(() => {}).then(async () => {
+    try {
+      const s = await request('/api/draft', work); if (state.data) state.data.session = s;
+      if (state.mode === 'exam') updateNav();
+    } catch (e) {
+      if (!pendingDraft && state.data?.session?.status === 'active') pendingDraft = work;
+      throw e;
+    }
+  });
+  return draftChain;
+}
+async function flushMeta(applyCode = false) {
+  clearTimeout(metaTimer);
+  const title = document.querySelector('#exam-title')?.value ?? pendingTitle;
+  const code = applyCode ? document.querySelector('#editor-code')?.value : undefined;
+  if (title === null && !code) return;
+  const result = await request('/api/editor/update', { ...(title !== null ? { title } : {}), ...(code ? { code } : {}) });
+  state.data.editor = result.editor; pendingTitle = null;
+  if (result.code) state.editorCode = result.code;
+}
+async function refresh() {
+  const next = await request('/api/state'); state.data = next;
+  if (next.session?.status === 'finished' && state.mode === 'exam') {
+    if (modal.open) modal.close('expired'); pendingDraft = null; clearTimeout(draftTimer);
+    state.mode = 'result'; state.task = null; render(); toast('Экзамен завершён. Новые ответы больше не принимаются.');
+  }
+  return next;
+}
+async function navigate(id) {
+  if (id < 1 || id > 16 || id === state.task?.id) return;
+  await flushDraft(); state.task = await request('/api/navigate', { id });
+  state.data.session.currentTask = id; render();
+}
+async function save() {
+  const text = document.querySelector('#answer-text')?.value;
+  await flushDraft(); const result = await request('/api/save', { id: state.task.id, text });
+  state.task = result.task; state.data.session = result.session; render(true); toast('Ответ сохранён на компьютере.');
+}
+async function importImageFiles(files, auto = true) {
+  if (!files.length) return;
+  await flushMeta();
+  const names = new Set();
+  for (const f of files) { if (names.has(f.name.toLowerCase())) throw new Error(`В выбранных папках повторяется имя «${f.name}». Переименуйте файлы перед импортом.`); names.add(f.name.toLowerCase()); }
+  let count = 0, ignored = 0; const errors = [];
+  for (let i = 0; i < files.length; i++) {
+    const f = files[i];
+    if (auto && !/^(0?[1-9]|1[0-6])\.\d+\.(png|jpe?g|gif|webp|bmp)$/i.test(f.name)) { ignored++; continue; }
+    try {
+      toast(`Импорт изображений: ${i + 1} из ${files.length}`, false, true);
+      const v = await request(`/api/upload?kind=image&auto=${auto ? 1 : 0}&task=${state.editorTask}&name=${encodeURIComponent(f.name)}`, undefined, f);
+      if (v.ignored) ignored++; else { state.data.editor = v.editor; count++; }
+    } catch (e) { errors.push(`${f.name}: ${e.message}`); }
+  }
+  render(); toast(`Добавлено: ${count}. Пропущено по имени: ${ignored}.${errors.length ? ` Ошибок: ${errors.length}. ${errors[0]}` : ''}`, !!errors.length);
+}
+function applyZoom() {
+  const el = document.querySelector('#task-content'), label = document.querySelector('#zoom-label');
+  if (!el) return;
+  el.classList.remove('zoom-75', 'zoom-100', 'zoom-150');
+  const classes = ['', 'zoom-100', 'zoom-150', 'zoom-75'];
+  if (classes[state.zoom]) el.classList.add(classes[state.zoom]);
+  if (label) label.textContent = ['По ширине', '100%', '150%', '75%'][state.zoom];
+}
+const actions = {
+  home: async () => { if (state.mode === 'editor') await flushMeta(); state.mode = 'home'; await refresh(); render(); },
+  editor: async () => { await refresh(); state.mode = 'editor'; render(); },
+  registration: async () => { state.mode = 'registration'; render(); },
+  'open-exam': async () => {
+    const [file] = await pickFiles({ accept: '.oge,.zip' }); if (!file) return;
+    toast('Проверяем файл экзамена…', false, true);
+    state.data.exam = await request(`/api/upload?kind=package&name=${encodeURIComponent(file.name)}`, undefined, file);
+    state.mode = 'registration'; render(); toast('Вариант загружен. Введите регистрационные данные.');
+  },
+  demo: async () => { state.data.exam = await request('/api/demo', {}); state.mode = 'registration'; render(); toast('Код демонстрационного экзамена: DEMO-2026. Используйте вымышленные данные.'); },
+  task: async el => navigate(Number(el.dataset.id)), previous: async () => navigate(state.task.id - 1), next: async () => navigate(state.task.id + 1),
+  save,
+  attach: async () => {
+    const [file] = await pickFiles(); if (!file) return;
+    toast('Сохраняем копию выбранного файла…', false, true);
+    state.task = await request(`/api/upload?kind=answer&task=${state.task.id}&name=${encodeURIComponent(file.name)}`, undefined, file);
+    await refresh(); render(true); toast('Файл прикреплён. Теперь нажмите «Сохранить ответ».');
+  },
+  'clear-answer': async () => {
+    if (!await ask('Очистить ответ?', 'Сохранённый ответ и черновик этого задания будут очищены. Исходный файл на вашем компьютере не изменится.', 'Очистить', true)) return;
+    await flushDraft(); const v = await request('/api/clear', { id: state.task.id }); state.task = v.task; state.data.session = v.session; render(true); toast('Ответ очищен.');
+  },
+  finish: async () => {
+    await flushDraft(); await refresh(); if (state.data.session.status !== 'active') return;
+    const a = state.data.session;
+    if (!await ask('Завершить экзамен?', `Сохранено ответов: ${a.savedCount} из 16. Без ответа: ${16-a.savedCount}.\n${a.dirtyCount ? `Есть несохранённые изменения: ${a.dirtyCount}. ` : ''}Черновики попадут в отдельный раздел архива и не будут считаться сданными ответами.\nПосле завершения изменить ответы нельзя. Таймер продолжает идти, пока открыто это окно.`, 'Завершить экзамен', true)) return;
+    toast('Собираем папку и ZIP с результатами…', false, true);
+    state.data.session = await request('/api/finish', { confirm: true }); state.mode = 'result'; state.task = null; render(); toast('Экзамен завершён.');
+  },
+  fullscreen: async () => { if (document.fullscreenElement) await document.exitFullscreen(); else await document.documentElement.requestFullscreen(); },
+  'zoom-in': async () => { state.zoom = state.zoom === 3 ? 0 : Math.min(2, state.zoom + 1); applyZoom(); },
+  'zoom-out': async () => { state.zoom = state.zoom === 0 ? 3 : state.zoom === 3 ? 3 : state.zoom - 1; applyZoom(); },
+  'download-asset': async el => { await download(`/api/asset?id=${encodeURIComponent(el.dataset.id)}&download=1`, el.dataset.name); toast('Файл передан в загрузки браузера.'); },
+  'editor-task': async el => { await flushMeta(); state.editorTask = Number(el.dataset.id); render(); },
+  'generate-code': async () => { await flushMeta(); const v = await request('/api/editor/update', { generateCode: true }); state.data.editor = v.editor; state.editorCode = v.code; render(); toast('Новый код установлен. Сохраните его отдельно и сообщите ученикам.'); },
+  'set-code': async () => { await flushMeta(true); render(); toast('Название и код сохранены.'); },
+  'import-images': async () => importImageFiles(await pickFiles({ directory: true }), true),
+  'import-images-files': async () => importImageFiles(await pickFiles({ multiple: true, accept: imageAccept }), true),
+  'add-image': async () => importImageFiles(await pickFiles({ multiple: true, accept: imageAccept }), false),
+  'add-resource': async () => {
+    const files = await pickFiles({ multiple: true }); if (!files.length) return; await flushMeta();
+    for (const f of files) {
+      const v = await request(`/api/upload?kind=resource&task=${state.editorTask}&name=${encodeURIComponent(f.name)}`, undefined, f); state.data.editor = v.editor;
+    }
+    render(); toast('Исходные файлы добавлены.');
+  },
+  'remove-asset': async el => {
+    if (!await ask('Удалить файл из задания?', 'Файл будет удалён из проекта. Оригинал на компьютере останется без изменений.', 'Удалить', true)) return;
+    await flushMeta(); state.data.editor = await request('/api/editor/remove', { id: el.dataset.id }); render(); toast('Файл удалён из задания.');
+  },
+  'export-project': async () => exportEditor(false), 'export-exam': async () => exportEditor(true),
+  'open-project': async () => {
+    const [file] = await pickFiles({ accept: '.oge,.zip' }); if (!file) return;
+    if (!await ask('Открыть другой проект?', 'Текущий локальный проект будет заменён. Ранее скачанные проекты и экзамены сохранятся.', 'Открыть')) return;
+    toast('Проверяем проект…', false, true);
+    state.data.editor = await request(`/api/upload?kind=package&edit=1&name=${encodeURIComponent(file.name)}`, undefined, file);
+    state.editorTask = 1; state.editorCode = ''; pendingTitle = null; render(); toast('Проект открыт. Можно сохранить прежний код или установить новый.');
+  },
+  'new-project': async () => {
+    if (!await ask('Начать новый проект?', 'Сначала скачайте текущий проект, если он нужен. Локальный рабочий проект будет заменён.', 'Создать')) return;
+    state.data.editor = await request('/api/editor/new', {}); state.editorTask = 1; state.editorCode = ''; pendingTitle = null; render(); toast('Создан новый проект.');
+  },
+  'download-result': async () => { await download('/api/result', `OGE_${state.data.session.candidate.registration}_results.zip`); toast('Архив передан в загрузки браузера. Основная копия остаётся в папке результатов.'); },
+  'open-folder': async () => { await request('/api/open-folder', {}); },
+  'retry-export': async () => { toast('Повторяем экспорт…', false, true); state.data.session = await request('/api/export/retry', {}); render(); toast(state.data.session.archiveReady ? 'Архив сформирован.' : 'Экспорт пока не завершён.', !state.data.session.archiveReady); },
+  dismiss: async () => { state.data = await request('/api/dismiss', {}); state.mode = 'home'; render(); },
+  quit: async () => {
+    const active = state.data.session?.status === 'active';
+    if (!await ask('Закрыть приложение?', active ? 'Экзамен не будет сдан досрочно. Время не ставится на паузу: после повторного запуска сеанс восстановится, а просроченный экзамен завершится автоматически. Для сдачи сейчас нажмите «Завершить экзамен».' : 'Все уже сохранённые проекты и результаты останутся на этом компьютере.', 'Закрыть приложение')) return;
+    if (active) await flushDraft(); if (state.mode === 'editor') await flushMeta();
+    await request('/api/quit', { confirm: true }); state.stopped = true;
+    app.innerHTML = `<main class="loading"><h1>Приложение закрыто</h1><p>Эту вкладку можно закрыть. Для продолжения запустите симулятор через ярлык или start.sh.</p></main>`;
+  }
+};
+async function exportEditor(publish) {
+  await flushMeta(true); toast(publish ? 'Проверяем задания и собираем экзамен…' : 'Собираем проект…', false, true);
+  const v = await request('/api/editor/export', { publish });
+  await download(`/api/package?id=${encodeURIComponent(v.id)}`, publish ? 'exam.oge' : 'project.oge');
+  render(); toast(publish ? 'Экзамен экспортирован. Передайте ученикам файл exam.oge, код — отдельно.' : 'Проект сохранён. Незавершённый проект нельзя запустить как экзамен.');
+}
+app.addEventListener('click', e => {
+  const el = e.target.closest('[data-action]'); if (!el || el.disabled) return;
+  const action = actions[el.dataset.action]; if (action) { e.preventDefault(); run(() => action(el)); }
+});
+app.addEventListener('submit', e => {
+  if (e.target.id !== 'registration-form') return;
+  e.preventDefault(); const form = e.target, b = Object.fromEntries(new FormData(form));
+  run(async () => {
+    try {
+      const code = b.code; delete b.code;
+      state.data.session = await request('/api/start', { candidate: b, code });
+      state.editorCode = ''; state.task = await request('/api/task?id=1'); state.mode = 'exam'; render(); toast('Экзамен начался. Удачи!');
+    } catch (e) { const error = document.querySelector('#registration-error'); if (error) error.textContent = e.message; else throw e; }
+  });
+});
+app.addEventListener('input', e => {
+  if (e.target.id === 'answer-text') {
+    state.task.text = e.target.value; pendingDraft = { id: state.task.id, text: e.target.value }; markDirty();
+    clearTimeout(draftTimer); draftTimer = setTimeout(() => flushDraft().catch(e => toast(e.message, true)), 400);
+  } else if (e.target.id === 'exam-title') {
+    pendingTitle = e.target.value; clearTimeout(metaTimer); metaTimer = setTimeout(() => flushMeta().catch(e => toast(e.message, true)), 700);
+  } else if (e.target.id === 'editor-code') state.editorCode = e.target.value;
+});
+app.addEventListener('dragover', e => { if (state.mode === 'editor' && e.target.closest('#drop-area')) { e.preventDefault(); document.querySelector('#drop-area').classList.add('drag-over'); } });
+app.addEventListener('dragleave', e => { if (e.target.closest('#drop-area')) document.querySelector('#drop-area')?.classList.remove('drag-over'); });
+app.addEventListener('drop', e => {
+  if (state.mode !== 'editor' || !e.target.closest('#drop-area')) return;
+  e.preventDefault(); document.querySelector('#drop-area').classList.remove('drag-over'); const files = [...e.dataTransfer.files]; run(() => importImageFiles(files, false));
+});
+document.addEventListener('keydown', e => { if ((e.ctrlKey || e.metaKey) && e.key === 'Enter' && state.mode === 'exam' && !modal.open) { e.preventDefault(); run(save); } });
+window.addEventListener('beforeunload', e => { if (!state.stopped && (state.data?.session?.status === 'active' || pendingTitle !== null)) { e.preventDefault(); e.returnValue = ''; } });
+async function boot() {
+  if (!token) {
+    app.innerHTML = `<main class="loading"><h1>Откройте приложение через ярлык</h1><p>Страница без локального ключа не имеет доступа к экзаменам. Запустите start.sh или откройте приватный файл OPEN-IN-BROWSER.html в папке данных приложения.</p></main>`; return;
+  }
+  try {
+    await refresh();
+    if (state.data.session?.status === 'active') { state.task = await request(`/api/task?id=${state.data.session.currentTask}`); state.mode = 'exam'; }
+    else if (state.data.session?.status === 'finished') state.mode = 'result';
+    render(); if (state.data.session?.recovered) toast('Сеанс восстановлен. Ответы сохранены, таймер не обнулён.');
+  } catch (e) { app.innerHTML = `<main class="loading"><h1>Не удалось открыть приложение</h1><p>${V.esc(e.message)}</p><p>Повторно запустите симулятор через start.sh.</p></main>`; }
+}
+setInterval(async () => {
+  if (polling || state.stopped || state.mode !== 'exam') return; polling = true;
+  try {
+    await refresh();
+    const timer = document.querySelector('#timer');
+    if (timer) { timer.textContent = V.time(state.data.session.remainingMs); timer.parentElement.classList.toggle('urgent', state.data.session.remainingMs <= 300000); updateNav(); }
+    const banner = document.querySelector('#connection-banner');
+    if (banner) { banner.hidden = !state.data.warning; banner.textContent = state.data.warning || ''; }
+  } catch (e) {
+    const banner = document.querySelector('#connection-banner'); if (banner) { banner.hidden = false; banner.textContent = 'Связь с приложением потеряна. Таймер не ставится на паузу. Не закрывайте страницу; сообщите организатору.'; }
+  } finally { polling = false; }
+}, 1000);
+boot();

@@ -1,0 +1,10 @@
+node_modules/
+dist/
+.data/
+*.log
+*.tmp
+*.oge
+results/
+sessions/
+.env
+!examples/*.oge
