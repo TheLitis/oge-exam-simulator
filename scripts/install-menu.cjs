@@ -1,14 +1,13 @@
 'use strict';
-const fs=require('node:fs/promises');
-const path=require('node:path');
-const os=require('node:os');
-(async()=>{
- const root=path.resolve(process.argv[2]||path.join(__dirname,'../..'));
- const file=path.join(process.env.XDG_DATA_HOME||path.join(os.homedir(),'.local/share'),'applications/oge-exam-simulator.desktop');
- if(/[\r\n]/.test(root))throw new Error('Путь к программе содержит перенос строки. Переместите папку.');
- const quoted='"'+path.join(root,'start.sh').replace(/[%]/g,'%%').replace(/[\\"$`]/g,c=>'\\'+c)+'"';
- const icon=path.join(root,'app/ui/icon.svg').replace(/\\/g,'\\\\');
- const contents=`[Desktop Entry]\nType=Application\nName=Симулятор экзамена ОГЭ\nComment=Информатика: 16 заданий, 150 минут\nExec=${quoted}\nIcon=${icon}\nTerminal=false\nCategories=Education;\nStartupNotify=false\n`;
- await fs.mkdir(path.dirname(file),{recursive:true});await fs.writeFile(file,contents,{mode:0o644});
- console.log('Ярлык добавлен в меню приложений: '+file+'\nНе перемещайте папку программы после установки ярлыка.');
-})().catch(e=>{console.error('Не удалось создать ярлык: '+e.message);process.exitCode=1;});
+// Compatibility entry point. Both GUI and command-line installation create
+// a persistent user copy instead of referencing the extracted download.
+const path = require('node:path');
+const { installBundle } = require('./install-gui.cjs');
+async function main(root = path.resolve(__dirname, '../..')) {
+  const installed = await installBundle(root);
+  console.log('Приложение установлено для текущего пользователя: ' + installed.currentRoot);
+  console.log('Ярлык добавлен в меню приложений: ' + installed.menuFile);
+  if (installed.desktopFile) console.log('Ярлык добавлен на рабочий стол: ' + installed.desktopFile);
+}
+module.exports = { main };
+if (require.main === module) main(process.argv[2]).catch(error => { console.error('Не удалось установить приложение: ' + error.message); process.exitCode = 1; });
