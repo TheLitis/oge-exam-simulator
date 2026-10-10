@@ -1,0 +1,11 @@
+{
+  "name": "mos-testbed-console",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Local noVNC console for the MOS OS test VM",
+  "engines": { "node": ">=22.16.0" },
+  "dependencies": {
+    "@novnc/novnc": "1.7.0",
+    "ws": "8.22.0"
+  }
+}

@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>MOS ОС · тестовый стенд</title>
+  <style nonce="__CONSOLE_NONCE__">
+    :root { color-scheme: dark; font: 14px system-ui, sans-serif; background: #10151d; color: #e6edf6; }
+    * { box-sizing: border-box; }
+    html, body { width: 100%; height: 100%; margin: 0; }
+    body { display: flex; flex-direction: column; }
+    header { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; padding: 12px 18px; background: #1b2432; border-bottom: 1px solid #354156; }
+    h1 { font-size: 15px; margin: 0; font-weight: 650; }
+    #status { margin-right: auto; color: #f3c874; }
+    #status[data-state="connected"] { color: #83dfaf; }
+    #status[data-state="disconnected"] { color: #f3a19e; }
+    button { font: inherit; color: inherit; background: #29374b; border: 1px solid #53627b; border-radius: 6px; padding: 7px 11px; cursor: pointer; }
+    button:hover:enabled { background: #3b4e6a; }
+    button:disabled { opacity: .45; cursor: default; }
+    button:focus-visible, input:focus-visible { outline: 2px solid #98c3ff; outline-offset: 3px; }
+    label { display: flex; align-items: center; gap: 6px; white-space: nowrap; }
+    #screen { flex: 1; min-height: 0; overflow: auto; background: #10151d; }
+    footer { padding: 7px 18px; font-size: 12px; color: #a7b6cb; background: #1b2432; border-top: 1px solid #354156; }
+    @media (max-width: 700px) { header { gap: 8px; padding: 10px; } #status { flex-basis: 100%; order: 4; } footer { padding: 7px 10px; } }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>MOS ОС · тестовый стенд</h1>
+    <span id="status" role="status" aria-live="polite" data-state="loading">Загрузка консоли…</span>
+    <label><input id="scale" type="checkbox" checked>По размеру окна</label>
+    <button id="reconnect" type="button" disabled>Подключить</button>
+    <button id="cad" type="button" disabled>Ctrl + Alt + Del</button>
+  </header>
+  <main id="screen" aria-label="Экран виртуальной машины MOS ОС"></main>
+  <footer>Нажмите на экран виртуальной машины, чтобы передавать ей ввод с клавиатуры.</footer>
+  <script type="module" nonce="__CONSOLE_NONCE__">
+    const status = document.getElementById('status');
+    const screen = document.getElementById('screen');
+    const reconnect = document.getElementById('reconnect');
+    const cad = document.getElementById('cad');
+    const scale = document.getElementById('scale');
+    let RFB;
+    let current;
+    let generation = 0;
+
+    function setStatus(state, message) {
+      status.dataset.state = state;
+      status.textContent = message;
+      cad.disabled = state !== 'connected';
+      reconnect.disabled = state === 'connecting' || state === 'loading';
+      reconnect.textContent = state === 'connected' ? 'Переподключить' : 'Подключить';
+    }
+
+    function connect() {
+      const attempt = ++generation;
+      if (current) current.disconnect();
+      setStatus('connecting', 'Подключение…');
+      let problem = '';
+      try {
+        const url = new URL('/websockify', window.location.href);
+        url.protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const connection = new RFB(screen, url.href, { shared: true, wsProtocols: ['binary'] });
+        current = connection;
+        connection.scaleViewport = scale.checked;
+        connection.resizeSession = false;
+        connection.background = '#10151d';
+        connection.addEventListener('connect', () => {
+          if (attempt !== generation) return;
+          setStatus('connected', 'Подключено');
+          connection.focus();
+        });
+        connection.addEventListener('disconnect', event => {
+          if (attempt !== generation) return;
+          current = undefined;
+          setStatus('disconnected', problem || (event.detail.clean ? 'Отключено' : 'Соединение закрыто. Проверьте, что виртуальная машина запущена.'));
+        });
+        connection.addEventListener('credentialsrequired', () => {
+          if (attempt !== generation) return;
+          problem = 'VNC запросил авторизацию. Проверьте параметры запуска стенда.';
+          connection.disconnect();
+        });
+        connection.addEventListener('securityfailure', () => {
+          if (attempt === generation) problem = 'Не удалось согласовать подключение к VNC.';
+        });
+      } catch (error) {
+        current = undefined;
+        setStatus('disconnected', 'Не удалось открыть подключение к виртуальной машине.');
+        console.error(error);
+      }
+    }
+
+    reconnect.addEventListener('click', connect);
+    cad.addEventListener('click', () => {
+      if (!current || cad.disabled) return;
+      current.sendCtrlAltDel();
+      current.focus();
+    });
+    scale.addEventListener('change', () => {
+      if (current) current.scaleViewport = scale.checked;
+    });
+    window.addEventListener('pagehide', () => {
+      ++generation;
+      if (current) current.disconnect();
+    });
+
+    try {
+      ({ default: RFB } = await import('/novnc/core/rfb.js'));
+      connect();
+    } catch (error) {
+      setStatus('disconnected', 'Не удалось загрузить noVNC. Проверьте зависимости консоли.');
+      reconnect.disabled = true;
+      console.error(error);
+    }
+  </script>
+</body>
+</html>
