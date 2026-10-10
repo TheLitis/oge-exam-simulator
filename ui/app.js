@@ -36,11 +36,22 @@ function setBusy(value) {
   });
 }
 async function run(fn, message) {
-  if (state.busy) return; setBusy(true);
+  if (state.busy) return;
+  const focusedAnswer = document.activeElement?.id === 'answer-text'
+    ? { task: state.task?.id, start: document.activeElement.selectionStart, end: document.activeElement.selectionEnd }
+    : null;
+  setBusy(true);
   if (message) toast(message, false, true);
   try { await fn(); }
   catch (e) { toast(e.message, true); }
-  finally { setBusy(false); }
+  finally {
+    setBusy(false);
+    if (focusedAnswer && state.mode === 'exam' && state.task?.id === focusedAnswer.task) {
+      const input = document.querySelector('#answer-text');
+      input?.focus({ preventScroll: true });
+      input?.setSelectionRange(focusedAnswer.start, focusedAnswer.end);
+    }
+  }
 }
 function ask(title, message, confirm = 'Подтвердить', danger = false) {
   return new Promise(resolve => {
@@ -80,6 +91,7 @@ async function loadImages() {
 }
 function render(keepScroll = false) {
   const oldScroll = keepScroll ? document.querySelector('#task-content')?.scrollTop || 0 : 0;
+  const oldEditorScroll = document.querySelector('.editor-nav')?.scrollTop || 0;
   const s = state.data;
   if (state.mode === 'exam' && state.task) app.innerHTML = V.exam(s, state.task);
   else if (state.mode === 'editor') app.innerHTML = V.editor(s, state.editorTask, state.editorCode);
@@ -87,6 +99,16 @@ function render(keepScroll = false) {
   else if (state.mode === 'result') app.innerHTML = V.result(s);
   else app.innerHTML = V.home(s);
   document.querySelector('#task-content')?.scrollTo(0, oldScroll);
+  const editorNav = document.querySelector('.editor-nav');
+  if (editorNav) {
+    editorNav.scrollTop = oldEditorScroll;
+    const current = editorNav.querySelector('[aria-current="step"]');
+    if (current) {
+      const item = current.getBoundingClientRect(), frame = editorNav.getBoundingClientRect();
+      if (item.bottom > frame.bottom) editorNav.scrollTop += item.bottom - frame.bottom + 8;
+      else if (item.top < frame.top) editorNav.scrollTop -= frame.top - item.top + 8;
+    }
+  }
   if (state.mode === 'exam') applyZoom();
   loadImages();
   if (state.busy) setBusy(true);
@@ -98,7 +120,7 @@ function updateNav() {
 function markDirty() {
   if (state.mode !== 'exam') return;
   const status = state.data.session.statuses.find(t => t.id === state.task.id); status.dirty = true; updateNav();
-  const label = document.querySelector('#answer-status'); if (label) { label.textContent = 'Черновик · нажмите «Сохранить ответ»'; label.className = 'small amber-text'; }
+  const label = document.querySelector('#answer-status'); if (label) { label.textContent = 'Черновик'; label.className = 'small amber-text'; }
 }
 async function flushDraft() {
   clearTimeout(draftTimer);
@@ -168,6 +190,22 @@ function applyZoom() {
   if (label) label.textContent = ['По ширине', '100%', '150%', '75%'][state.zoom];
 }
 const actions = {
+  help: async () => {
+    const sections = {
+      home: ['Справка', 'Откройте файл .oge или .zip от организатора. Для тренировки доступен демонстрационный вариант с кодом DEMO-2026.\n\nВ редакторе можно создать собственный вариант.'],
+      registration: ['Перед началом', 'Таймер начнётся после ввода данных и правильного кода активации. Для демонстрационного варианта: DEMO-2026.\n\nДля тренировки используйте вымышленные данные. Регистрация хранится на этом компьютере и не проверяется по государственным базам.'],
+      exam: ['Работа с заданиями', 'В заданиях 1–12 введите краткий ответ. В заданиях 13–16 прикрепите файл. После каждого задания нажимайте «Сохранить ответ» или Ctrl+Enter. Черновики не считаются сданными ответами.\n\nФайлы для работы доступны в заданиях 11–14. После изменения файла прикрепите его заново.\n\nТаймер не останавливается при закрытии окна или перезапуске.'],
+      editor: ['Подготовка варианта', 'Имена изображений: 1.1.png, 1.2.png, 2.1.png и так далее. Импорт из папки распределяет их по номеру задания. Порядок лексикографический: 1.10.png раньше 1.2.png. Для числового порядка используйте 1.01.png, 1.02.png.\n\nВ задания 11–14 добавьте исходные файлы. Установите код активации перед экспортом.\n\n«Сохранить проект» допускает незавершённый вариант. «Экспортировать экзамен» проверяет все 16 заданий.'],
+      result: ['Результаты', 'Папка и ZIP содержат сохранённые ответы, отдельно черновики и регистрационные данные. Архив не зашифрован: передавайте его только организатору.\n\nЧисло сохранённых ответов не является оценкой. Автоматическая проверка правильности не выполняется.']
+    };
+    const [title, message] = sections[state.mode] || sections.home;
+    await new Promise(resolve => {
+      modal.innerHTML = `<h2 id="modal-title">${V.esc(title)}</h2><p>${V.esc(message)}</p><div class="button-row"><button class="primary" data-choice="close" autofocus>Понятно</button></div>`;
+      modal.onclick = e => { if (e.target.closest('[data-choice]')) modal.close(); };
+      modal.onclose = () => { modal.onclick = null; modal.onclose = null; resolve(); };
+      modal.showModal();
+    });
+  },
   home: async () => { if (state.mode === 'editor') await flushMeta(); state.mode = 'home'; await refresh(); render(); },
   editor: async () => { await refresh(); state.mode = 'editor'; render(); },
   registration: async () => { state.mode = 'registration'; render(); },
@@ -259,7 +297,7 @@ app.addEventListener('submit', e => {
     try {
       const code = b.code; delete b.code;
       state.data.session = await request('/api/start', { candidate: b, code });
-      state.editorCode = ''; state.task = await request('/api/task?id=1'); state.mode = 'exam'; render(); toast('Экзамен начался. Удачи!');
+      state.editorCode = ''; state.task = await request('/api/task?id=1'); state.mode = 'exam'; render(); toast('Экзамен начался.');
     } catch (e) { const error = document.querySelector('#registration-error'); if (error) error.textContent = e.message; else throw e; }
   });
 });

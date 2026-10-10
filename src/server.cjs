@@ -80,7 +80,7 @@ async function startServer({ root, open = true, port = 0, lock = true, clock } =
   const key = crypto.randomBytes(32).toString('hex');
   let chain = Promise.resolve(), timer, base, closing = false, uploads = 0;
   const serial = fn => { const p = chain.then(fn); chain = p.catch(() => {}); return p; };
-  const publicFiles = new Map([['/', ['index.html', 'text/html; charset=utf-8']], ['/app.js', ['app.js','text/javascript; charset=utf-8']], ['/views.js', ['views.js','text/javascript; charset=utf-8']], ['/style.css',['style.css','text/css; charset=utf-8']], ['/icon.svg',['icon.svg','image/svg+xml']]]);
+  const publicFiles = new Map([['/', ['index.html', 'text/html; charset=utf-8']], ['/app.js', ['app.js','text/javascript; charset=utf-8']], ['/views.js', ['views.js','text/javascript; charset=utf-8']], ['/style.css',['style.css','text/css; charset=utf-8']], ['/icon.svg',['icon.svg','image/svg+xml']], ['/fonts/inter.ttf', ['fonts/inter.ttf', 'font/ttf']]]);
   async function close() {
     if (closing) return; closing = true; clearInterval(timer);
     await serial(() => service.pulse(true)).catch(() => {});
