@@ -61,7 +61,7 @@ export function registration(s) {
         <div class="field-row"><label>Фамилия<input name="surname" placeholder="Иванов" maxlength="80" autocomplete="off" required></label><label>Имя<input name="name" placeholder="Иван" maxlength="80" autocomplete="off" required></label></div>
         <div class="field-row passport-row"><label>Серия паспорта<input name="passportSeries" inputmode="numeric" pattern="[0-9]{4}" minlength="4" maxlength="4" placeholder="0000" autocomplete="off" required></label><label>Номер паспорта<input name="passportNumber" inputmode="numeric" pattern="[0-9]{6}" minlength="6" maxlength="6" placeholder="000000" autocomplete="off" required></label></div>
         <p class="form-note">Для тренировки используйте вымышленные данные.</p>
-        <div class="activation-box"><label>Код активации<input name="code" type="password" placeholder="Введите код" maxlength="128" autocomplete="new-password" required></label>
+        <div class="activation-box"><label>Код активации<input name="code" type="text" placeholder="Введите код" maxlength="128" autocomplete="off" autocapitalize="off" spellcheck="false" required></label>
         </div>
         <button class="primary wide" type="submit">Начать экзамен ${icon('arrow')}</button>
         <p id="registration-error" class="form-error" role="alert"></p>
