@@ -59,6 +59,13 @@ $vmArguments = @(
     '-qmp', 'tcp:127.0.0.1:14500,server=on,wait=off', '-display', 'none',
     '-vnc', '127.0.0.1:10000', '-serial', ('file:' + (Join-Path $stateRoot 'evidence\serial.log'))
 )
+if ($Mode -eq 'Installed' -and $Accelerator -eq 'whpx') {
+    # WHPX can stall in UEFI after a guest soft reset. QEMU's supported action
+    # exits instead of resetting; start MOS again with Open-MosTestbed.ps1 or
+    # Restart-MosTestbed.ps1 after the guest finishes shutting down.
+    # https://www.qemu.org/docs/master/system/qemu-manpage.html
+    $vmArguments += @('-action', 'reboot=shutdown')
+}
 if ($Mode -ne 'Installed') {
     if (-not (Test-Path -LiteralPath $isoPath)) { throw 'MOS ISO is missing.' }
     $bootRoot = Join-Path $stateRoot 'boot'
@@ -74,3 +81,6 @@ $qemuProcess = Start-Process -FilePath $qemuExe -ArgumentList $quotedArguments -
 $processRecord = [ordered]@{ pid=$qemuProcess.Id; startedAt=$qemuProcess.StartTime.ToUniversalTime().ToString('o'); executable=$qemuExe; bootMode=$Mode; accelerator=$Accelerator; memoryMiB=$MemoryMiB; cpuCount=$CpuCount; console='http://127.0.0.1:13600/'; qmpPort=14500; qgaPort=14501; sshPort=22222; vncPort=15900 }
 $processRecord | ConvertTo-Json | Set-Content -LiteralPath $processPath -Encoding utf8NoBOM
 Write-Output "Started MOS VM: PID $($qemuProcess.Id), mode $Mode, accelerator $Accelerator. Console: http://127.0.0.1:13600/"
+if ($Mode -eq 'Installed' -and $Accelerator -eq 'whpx') {
+    Write-Output 'A reboot requested inside MOS shuts down this WHPX VM. Start it again with Open-MosTestbed.ps1 or Restart-MosTestbed.ps1.'
+}
