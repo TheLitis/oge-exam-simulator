@@ -8,3 +8,7 @@ results/
 sessions/
 .env
 !examples/*.oge
+
+# Original transfer archives, bundled runtime and conversation snapshots.
+/imported/
+/repository.bundle
