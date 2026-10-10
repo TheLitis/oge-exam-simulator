@@ -43,8 +43,10 @@ if (-not (Test-Path -LiteralPath $varsPath)) {
 }
 $firmwarePath = Join-Path $qemuRoot 'share\edk2-x86_64-code.fd'
 $acceleratorOption = if ($Accelerator -eq 'whpx') { 'whpx,kernel-irqchip=off' } else { 'tcg,thread=multi' }
+# The VMware backdoor's vmmouse can take over input in relative mode. VNC
+# needs the USB tablet's absolute coordinates to match the displayed desktop.
 $vmArguments = @(
-    '-name', 'MOS-OGE-260926', '-machine', 'q35', '-accel', $acceleratorOption,
+    '-name', 'MOS-OGE-260926', '-machine', 'q35,vmport=off', '-accel', $acceleratorOption,
     '-cpu', 'max', '-m', "$MemoryMiB", '-smp', "$CpuCount",
     '-drive', "if=pflash,format=raw,readonly=on,file=$firmwarePath",
     '-drive', "if=pflash,format=raw,file=$varsPath",

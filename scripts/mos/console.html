@@ -20,6 +20,7 @@
     button:focus-visible, input:focus-visible { outline: 2px solid #98c3ff; outline-offset: 3px; }
     label { display: flex; align-items: center; gap: 6px; white-space: nowrap; }
     #screen { flex: 1; min-height: 0; overflow: auto; background: #10151d; }
+    #input-state[data-active="true"] { color: #83dfaf; }
     footer { padding: 7px 18px; font-size: 12px; color: #a7b6cb; background: #1b2432; border-top: 1px solid #354156; }
     @media (max-width: 700px) { header { gap: 8px; padding: 10px; } #status { flex-basis: 100%; order: 4; } footer { padding: 7px 10px; } }
   </style>
@@ -30,16 +31,19 @@
     <span id="status" role="status" aria-live="polite" data-state="loading">Загрузка консоли…</span>
     <label><input id="scale" type="checkbox" checked>По размеру окна</label>
     <button id="reconnect" type="button" disabled>Подключить</button>
+    <button id="control" type="button" disabled>Управлять</button>
     <button id="cad" type="button" disabled>Ctrl + Alt + Del</button>
   </header>
   <main id="screen" aria-label="Экран виртуальной машины MOS ОС"></main>
-  <footer>Нажмите на экран виртуальной машины, чтобы передавать ей ввод с клавиатуры.</footer>
+  <footer><span id="input-state" role="status" data-active="false">Нажмите на экран или «Управлять», чтобы передавать клавиатуру в МОС.</span></footer>
   <script type="module" nonce="__CONSOLE_NONCE__">
     const status = document.getElementById('status');
     const screen = document.getElementById('screen');
     const reconnect = document.getElementById('reconnect');
     const cad = document.getElementById('cad');
     const scale = document.getElementById('scale');
+    const control = document.getElementById('control');
+    const inputState = document.getElementById('input-state');
     let RFB;
     let current;
     let generation = 0;
@@ -48,8 +52,19 @@
       status.dataset.state = state;
       status.textContent = message;
       cad.disabled = state !== 'connected';
+      control.disabled = state !== 'connected';
       reconnect.disabled = state === 'connecting' || state === 'loading';
       reconnect.textContent = state === 'connected' ? 'Переподключить' : 'Подключить';
+      updateInputState();
+    }
+
+    function updateInputState() {
+      const active = status.dataset.state === 'connected' && document.hasFocus() &&
+        document.activeElement === screen.querySelector('canvas');
+      inputState.dataset.active = String(active);
+      inputState.textContent = active
+        ? 'Клавиатура передаётся в МОС. Alt+Shift — переключение раскладки.'
+        : 'Нажмите на экран или «Управлять», чтобы передавать клавиатуру в МОС.';
     }
 
     function connect() {
@@ -62,6 +77,8 @@
         url.protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
         const connection = new RFB(screen, url.href, { shared: true, wsProtocols: ['binary'] });
         current = connection;
+        connection.viewOnly = false;
+        connection.focusOnClick = true;
         connection.scaleViewport = scale.checked;
         connection.resizeSession = false;
         connection.background = '#10151d';
@@ -69,6 +86,7 @@
           if (attempt !== generation) return;
           setStatus('connected', 'Подключено');
           connection.focus();
+          updateInputState();
         });
         connection.addEventListener('disconnect', event => {
           if (attempt !== generation) return;
@@ -91,6 +109,14 @@
     }
 
     reconnect.addEventListener('click', connect);
+    control.addEventListener('click', () => {
+      if (current && !control.disabled) current.focus();
+      updateInputState();
+    });
+    document.addEventListener('focusin', updateInputState);
+    document.addEventListener('focusout', updateInputState);
+    window.addEventListener('focus', updateInputState);
+    window.addEventListener('blur', updateInputState);
     cad.addEventListener('click', () => {
       if (!current || cad.disabled) return;
       current.sendCtrlAltDel();
