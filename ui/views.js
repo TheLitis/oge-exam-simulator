@@ -18,13 +18,17 @@ export function icon(name, cls = '') {
     refresh: '<path d="M20 7v5h-5M4 17v-5h5M6 6a8 8 0 0 1 13 2M18 18a8 8 0 0 1-13-2"/>',
     help: '<circle cx="12" cy="12" r="9"/><path d="M9 8a3 3 0 0 1 6 1c0 2-3 2-3 4M12 17h.01"/>',
     power: '<path d="M12 2v10M6 5a9 9 0 1 0 12 0"/>',
+    moon: '<path d="M20.9 13.1A9 9 0 0 1 10.9 3.1a9 9 0 1 0 10 10z"/>',
+    sun: '<circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M2 12h2M20 12h2m-3-9-1.4 1.4M7.4 16.6 6 18m12 0-1.4-1.4M7.4 7.4 6 6"/>',
   };
   return `<svg class="icon ${cls}" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${paths[name] || paths.file}</svg>`;
 }
 export function header(section = 'ОГЭ по информатике', right = '') {
+  const dark = document.documentElement.dataset.theme === 'dark';
   return `<header class="topbar" aria-label="${esc(section)}">
     <div class="brand"><img src="/icon.svg" width="36" height="36" alt=""><strong>Симулятор экзамена</strong></div>
     <div class="header-actions">${right}
+      <button class="icon-button theme-toggle" data-action="theme" title="${dark ? 'Включить светлую тему' : 'Включить ночную тему'}" aria-label="Ночная тема" aria-pressed="${dark}">${icon(dark ? 'sun' : 'moon')}</button>
       <button class="icon-button" data-action="help" title="Справка" aria-label="Справка">${icon('help')}</button>
       <button class="icon-button" data-action="quit" title="Закрыть приложение" aria-label="Закрыть приложение">${icon('power')}</button>
     </div>

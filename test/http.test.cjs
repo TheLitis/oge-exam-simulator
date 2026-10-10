@@ -37,6 +37,51 @@ test('API does not expose filesystem paths or unpublished internal data',async t
   assert.equal((await fetch(app.url+'/src/service.cjs',{headers})).status,404);
   assert.equal((await fetch(app.url+'/api/result',{headers})).status,400);
 });
+
+test('theme changes require authorization and accept only fixed appearance names',async t=>{
+  const {app,post,headers}=await server(t);
+  assert.equal(app.service.state().theme,'light');
+  assert.match(await (await fetch(app.url)).text(),/<html lang="ru" data-theme="light">/);
+  assert.equal((await fetch(app.url+'/api/theme',{method:'POST',body:'{"theme":"dark"}'})).status,401);
+  assert.equal((await fetch(app.url+'/api/theme',{method:'POST',headers:{...headers,Origin:'https://evil.example'},body:'{"theme":"dark"}'})).status,400);
+  for(const theme of ['auto','<script>',null,1,{}]) assert.equal((await post('/api/theme',{theme})).status,400);
+  assert.equal(app.service.state().theme,'light');
+  const dark=await post('/api/theme',{theme:'dark'});
+  assert.equal(dark.status,200);assert.equal(dark.body.value,'dark');
+  assert.match(await (await fetch(app.url)).text(),/<html lang="ru" data-theme="dark">/);
+  await post('/api/theme',{theme:'light'});
+  assert.match(await (await fetch(app.url)).text(),/<html lang="ru" data-theme="light">/);
+});
+
+test('night theme survives restart on a different port alongside exam and drafts',async t=>{
+  const {app,root,post}=await server(t);
+  await post('/api/demo');await post('/api/start',{candidate:PERSON,code:'DEMO-2026'});
+  await post('/api/save',{id:1,text:'42'});
+  await post('/api/draft',{id:2,text:'unsaved'});
+  const examId=app.service.config.examId,attemptId=app.service.attempt.id;
+  await post('/api/theme',{theme:'dark'});
+  assert.equal(app.service.config.examId,examId);assert.equal(app.service.config.attemptId,attemptId);
+  const previousPort=app.server.address().port;
+  await app.close();
+  // Reserve the old port to ensure this checks a new browser storage origin.
+  const reserve=require('node:http').createServer();
+  await new Promise(resolve=>reserve.listen(previousPort,'127.0.0.1',resolve));
+  let restarted;
+  try {
+    restarted=await startServer({root,open:false,lock:false});
+    assert.notEqual(restarted.server.address().port,previousPort);
+    assert.equal(restarted.service.state().theme,'dark');
+    assert.match(await (await fetch(restarted.url)).text(),/<html lang="ru" data-theme="dark">/);
+    assert.equal(restarted.service.config.examId,examId);
+    assert.equal(restarted.service.attempt.id,attemptId);
+    assert.equal(restarted.service.attempt.status,'active');
+    assert.equal(restarted.service.task(1).text,'42');
+    assert.equal(restarted.service.task(2).text,'unsaved');
+    const res=await fetch(restarted.url+'/api/theme',{method:'POST',headers:{Authorization:`Bearer ${restarted.key}`,'Content-Type':'application/json'},body:'{"theme":"light"}'});
+    assert.equal(res.status,200);
+    assert.equal((await fsp.readFile(path.join(root,'config.json'),'utf8')).includes('"theme": "light"'),true);
+  } finally {await restarted?.close();await new Promise(resolve=>reserve.close(resolve));}
+});
 test('full HTTP flow: activate, save, download supplied file, upload, confirm, ZIP',async t=>{
   const {app,headers,post}=await server(t);
   assert.equal((await post('/api/demo')).status,200);

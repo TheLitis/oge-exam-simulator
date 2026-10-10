@@ -127,6 +127,13 @@ async function startServer({ root, open = true, port = 0, lock = true, clock } =
       check(req.headers.host === new URL(base).host, 'Недопустимый Host.');
       const url = new URL(req.url, base);
       if (req.method === 'GET' && publicFiles.has(url.pathname)) {
+        if (url.pathname === '/') {
+          // Apply the saved appearance before CSS paints, including after a
+          // restart on a different port. Only fixed theme names enter the HTML.
+          const page = await fsp.readFile(path.join(__dirname, '../ui/index.html'), 'utf8');
+          res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+          res.end(page.replace('data-theme="light"', `data-theme="${service.theme()}"`)); return;
+        }
         const [name, type] = publicFiles.get(url.pathname); await sendFile(res, path.join(__dirname, '../ui', name), type); return;
       }
       // Public UI contains no session data. Allow opening its main page from
@@ -168,6 +175,7 @@ async function startServer({ root, open = true, port = 0, lock = true, clock } =
       const b = await bodyJson(req);
       let result;
       switch (url.pathname) {
+        case '/api/theme': result = await serial(() => service.setTheme(b.theme)); break;
         case '/api/editor/new': result = await serial(() => service.newEditor()); break;
         case '/api/editor/update': result = await serial(() => service.updateEditor(b)); break;
         case '/api/editor/remove': result = await serial(() => service.removeEditorAsset(b.id)); break;

@@ -69,6 +69,12 @@ class ExamService {
     M.validateShape(next); await json(this.dir('editor/manifest.json'), next, true); this.editor = next;
   }
   async persistConfig(patch) { const next = { ...this.config, ...patch }; await json(this.dir('config.json'), next, true); this.config = next; }
+  theme() { return this.config.theme === 'dark' ? 'dark' : 'light'; }
+  async setTheme(theme) {
+    check(theme === 'light' || theme === 'dark', 'Некорректная тема.');
+    await this.persistConfig({ theme });
+    return this.theme();
+  }
   assertIdle() { check(!this.attempt || this.attempt.status !== 'active', 'Во время экзамена редактор и смена варианта недоступны.'); }
   async assertActive() {
     check(this.attempt?.status === 'active', 'Экзамен не начат или уже завершён.');
@@ -91,7 +97,7 @@ class ExamService {
       statuses, savedCount: statuses.filter(s => s.saved).length, dirtyCount: statuses.filter(s => s.dirty).length,
       resultDir: a.resultDir || null, archiveReady: !!a.archivePath, exportError: a.exportError || null, recovered: this.recovered };
   }
-  state() { return { version: '1.0.0', exam: this.publicExam(this.exam), editor: this.attempt?.status === 'active' ? null : this.publicExam(this.editor), session: this.sessionView(), resultsRoot: this.dir('results'), warning: this.lastError }; }
+  state() { return { version: '1.0.0', theme: this.theme(), exam: this.publicExam(this.exam), editor: this.attempt?.status === 'active' ? null : this.publicExam(this.editor), session: this.sessionView(), resultsRoot: this.dir('results'), warning: this.lastError }; }
   async newEditor() { this.assertIdle(); await this.persistEditor(M.blankExam()); return this.publicExam(this.editor); }
   async updateEditor({ title, code, generateCode = false } = {}) {
     this.assertIdle(); const next = clone(this.editor); next.published = false;

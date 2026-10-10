@@ -7,6 +7,17 @@ const state = { data: null, mode: 'home', task: null, editorTask: 1, editorCode:
 const imageUrls = new Map();
 let toastTimer, draftTimer, metaTimer, pendingDraft = null, pendingTitle = null, draftChain = Promise.resolve(), polling = false, imageGeneration = 0;
 
+function applyTheme(theme) {
+  const dark = theme === 'dark';
+  document.documentElement.dataset.theme = dark ? 'dark' : 'light';
+  const button = app.querySelector('[data-action="theme"]');
+  if (button) {
+    button.title = dark ? 'Включить светлую тему' : 'Включить ночную тему';
+    button.setAttribute('aria-pressed', String(dark));
+    button.innerHTML = V.icon(dark ? 'sun' : 'moon');
+  }
+}
+
 function toast(message, error = false, persistent = false) {
   const el = document.querySelector('#toast'); clearTimeout(toastTimer); el.textContent = message; el.className = 'visible' + (error ? ' error' : '');
   if (!persistent) toastTimer = setTimeout(() => { el.className = ''; }, error ? 7500 : 4200);
@@ -93,6 +104,7 @@ function render(keepScroll = false) {
   const oldScroll = keepScroll ? document.querySelector('#task-content')?.scrollTop || 0 : 0;
   const oldEditorScroll = document.querySelector('.editor-nav')?.scrollTop || 0;
   const s = state.data;
+  applyTheme(s.theme);
   if (state.mode === 'exam' && state.task) app.innerHTML = V.exam(s, state.task);
   else if (state.mode === 'editor') app.innerHTML = V.editor(s, state.editorTask, state.editorCode);
   else if (state.mode === 'registration') app.innerHTML = V.registration(s);
@@ -190,6 +202,12 @@ function applyZoom() {
   if (label) label.textContent = ['По ширине', '100%', '150%', '75%'][state.zoom];
 }
 const actions = {
+  theme: async () => {
+    const theme = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';
+    state.data.theme = await request('/api/theme', { theme });
+    // Change only the palette and toggle, preserving inputs, drafts and scroll.
+    applyTheme(state.data.theme);
+  },
   help: async () => {
     const sections = {
       home: ['Справка', 'Откройте файл .oge или .zip от организатора. Для тренировки доступен демонстрационный вариант с кодом DEMO-2026.\n\nВ редакторе можно создать собственный вариант.'],
