@@ -26,6 +26,70 @@ async function zipData(entries, opts = {}) {
   return zip.generateAsync({ type:'nodebuffer', platform:'UNIX', ...opts });
 }
 
+test('new results use a visible directory and survive restart without a second ZIP', async t => {
+  const { root, clock } = await context(t, false);
+  const resultsRoot = path.join(root, 'Документы', 'Симулятор экзамена', 'Результаты');
+  const s = new ExamService(root, { ...clock, resultsRoot }); await s.init();
+  await s.importExam(DEMO); await s.start(PERSON, 'DEMO-2026');
+  await s.saveAnswer(1, '42'); await s.saveDraft(2, 'черновик'); await s.finish();
+  assert.equal(s.state().resultsRoot, resultsRoot);
+  assert.equal(path.dirname(s.attempt.resultDir), resultsRoot);
+  const archive = s.attempt.archivePath, originalHash = await I.hashFile(archive);
+  const zip = await JSZip.loadAsync(await fsp.readFile(archive));
+  assert.equal(JSON.parse(await zip.file('answers.json').async('string')).answers[0].answer, '42');
+  assert.equal(JSON.parse(await zip.file('drafts.json').async('string')).drafts['2'].text, 'черновик');
+  const restored = new ExamService(root, { ...clock, resultsRoot }); await restored.init();
+  assert.equal(restored.attempt.archivePath, archive);
+  assert.equal(await I.hashFile(archive), originalHash);
+  assert.equal((await fsp.readdir(resultsRoot)).length, 2);
+  assert.deepEqual(await fsp.readdir(path.join(root, 'results')), []);
+});
+
+test('all finished sessions including dismissed results migrate with their original archive bytes', async t => {
+  const { s, root, clock } = await context(t);
+  await s.setTheme('dark'); await s.saveAnswer(1, '42'); await s.finish();
+  const first = structuredClone(s.attempt);
+  await s.dismissResult(); await s.start(PERSON, 'DEMO-2026'); await s.finish();
+  const second = structuredClone(s.attempt);
+  const hashes = await Promise.all([first, second].map(a => I.hashFile(a.archivePath)));
+  const resultsRoot = path.join(root, 'Документы', 'Симулятор экзамена', 'Результаты');
+  const restored = new ExamService(root, { ...clock, resultsRoot }); await restored.init();
+  assert.equal(restored.theme(), 'dark'); assert.equal(restored.attempt.id, second.id);
+  for (const [index, original] of [first, second].entries()) {
+    const session = await I.readJson(path.join(root, 'sessions', original.id, 'session.json'));
+    assert.equal(path.dirname(session.resultDir), resultsRoot);
+    assert.equal(path.dirname(session.archivePath), resultsRoot);
+    assert.equal(await I.hashFile(session.archivePath), hashes[index]);
+    assert.equal(await I.hashFile(original.archivePath), hashes[index]);
+    const expected = { ...original, resultDir:session.resultDir, archivePath:session.archivePath };
+    assert.deepEqual(session, expected);
+  }
+  const again = new ExamService(root, { ...clock, resultsRoot }); await again.init();
+  assert.equal((await fsp.readdir(resultsRoot)).length, 4);
+  assert.equal(again.attempt.archivePath, restored.attempt.archivePath);
+});
+
+test('unavailable visible folder preserves legacy results and pending exports can be retried', async t => {
+  const { s, root, clock } = await context(t);
+  await s.saveAnswer(1, '42'); await s.finish();
+  const original = structuredClone(s.attempt), hash = await I.hashFile(original.archivePath);
+  const blocked = path.join(root, 'blocked'); await fsp.writeFile(blocked, 'file');
+  const resultsRoot = path.join(blocked, 'Результаты');
+  const restored = new ExamService(root, { ...clock, resultsRoot }); await restored.init();
+  assert.match(restored.state().warning, /Оригиналы сохранены/);
+  assert.equal(restored.attempt.archivePath, original.archivePath);
+  assert.equal(await I.hashFile(original.archivePath), hash);
+  await restored.dismissResult(); await restored.start(PERSON, 'DEMO-2026');
+  await restored.saveAnswer(1, '84'); await restored.finish();
+  assert.equal(restored.attempt.status, 'finished'); assert.equal(restored.sessionView().archiveReady, false);
+  await fsp.unlink(blocked); await fsp.mkdir(blocked);
+  await restored.exportResults();
+  assert.equal(restored.sessionView().archiveReady, true);
+  assert.equal(path.dirname(restored.attempt.archivePath), resultsRoot);
+  assert.equal(restored.attempt.answers[1].text, '84');
+  assert.equal(await I.hashFile(original.archivePath), hash);
+});
+
 test('16 tasks, exact duration and fixed answer/resource matrix', () => {
   const e = M.blankExam(); assert.equal(e.tasks.length,16); assert.equal(e.durationSeconds,9000);
   for (let id = 1; id <= 16; id++) { assert.equal(M.taskKind(id), id<=12?'short':'file'); assert.equal(M.hasResources(id), id>=11&&id<=14); }

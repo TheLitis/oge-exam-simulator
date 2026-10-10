@@ -1,7 +1,8 @@
 'use strict';
 const http = require('node:http');
 const os = require('node:os');
-const { spawn } = require('node:child_process');
+const { spawn, execFile } = require('node:child_process');
+const { promisify } = require('node:util');
 const { pipeline } = require('node:stream/promises');
 const { fs, fsp, path, crypto, UserError, check, LIMITS, mkdir, json, readJson, boundedCopy, safeName } = require('./io.cjs');
 const { ExamService } = require('./service.cjs');
@@ -33,6 +34,20 @@ async function openFolder(folder) {
   if (process.platform === 'linux') { const bin = await executable('xdg-open'); check(bin, 'Не найден xdg-open. Путь к результатам показан на экране.'); await launch(bin, [folder]); }
   else if (process.platform === 'darwin') await launch('/usr/bin/open', [folder]);
   else await launch('explorer.exe', [folder]);
+}
+async function defaultResultsDirectory() {
+  let documents = path.join(os.homedir(), 'Documents');
+  if (process.platform === 'linux') {
+    const bin = await executable('xdg-user-dir');
+    if (bin) {
+      try {
+        const { stdout } = await promisify(execFile)(bin, ['DOCUMENTS'], { encoding: 'utf8', timeout: 2000 });
+        const configured = stdout.trim();
+        if (path.isAbsolute(configured) && !configured.includes('\0')) documents = configured;
+      } catch { /* Use a visible Documents folder if the desktop helper is unavailable. */ }
+    }
+  }
+  return path.join(documents, 'Симулятор экзамена', 'Результаты');
 }
 async function bodyJson(req) {
   check(req.headers['content-type']?.split(';')[0] === 'application/json', 'Ожидается JSON.');
@@ -81,8 +96,9 @@ async function instanceResponds(info) {
   });
 }
 
-async function startServer({ root, open = true, port = 0, lock = true, clock } = {}) {
+async function startServer({ root, resultsRoot, open = true, port = 0, lock = true, clock } = {}) {
   process.umask(0o077);
+  const isolatedData = !!root;
   root ||= path.join(process.env.XDG_DATA_HOME || path.join(os.homedir(), '.local/share'), 'oge-exam-simulator');
   root = path.resolve(root); await mkdir(root);
   const lockDir = path.join(root, 'instance.lock');
@@ -106,7 +122,9 @@ async function startServer({ root, open = true, port = 0, lock = true, clock } =
       await fsp.rm(lockDir, { recursive: true, force: true }); await fsp.mkdir(lockDir, { mode: 0o700 });
     }
   }
-  const service = new ExamService(root, clock);
+  // Explicit --data runs stay isolated; normal desktop launches export to Documents.
+  resultsRoot ||= isolatedData ? path.join(root, 'results') : await defaultResultsDirectory();
+  const service = new ExamService(root, { ...clock, resultsRoot });
   try { await service.init(); } catch (e) { if (lock) await fsp.rm(lockDir, { recursive: true, force: true }); throw e; }
   const key = crypto.randomBytes(32).toString('hex');
   let chain = Promise.resolve(), timer, base, closing = false, uploads = 0;
@@ -189,7 +207,7 @@ async function startServer({ root, open = true, port = 0, lock = true, clock } =
         case '/api/finish': check(b.confirm === true, 'Необходимо подтвердить завершение.'); result = await serial(() => service.finish('manual')); break;
         case '/api/export/retry': result = await serial(() => service.exportResults()); break;
         case '/api/dismiss': result = await serial(() => service.dismissResult()); break;
-        case '/api/open-folder': await openFolder(service.attempt?.resultDir || service.dir('results')); result = true; break;
+        case '/api/open-folder': await openFolder(b.root === true ? service.resultsRoot : service.attempt?.resultDir || service.resultsRoot); result = true; break;
         case '/api/quit': check(b.confirm === true, 'Необходимо подтверждение.'); result = true; res.once('finish', () => setTimeout(() => close().catch(() => {}), 100)); break;
         default: throw new UserError('Не найдено.', 404);
       }
@@ -216,7 +234,7 @@ async function startServer({ root, open = true, port = 0, lock = true, clock } =
 }
 if (require.main === module) {
   const args = process.argv.slice(2), value = flag => args.includes(flag) ? args[args.indexOf(flag) + 1] : undefined;
-  startServer({ root: value('--data'), open: !args.includes('--no-open'), port: Number(value('--port') || 0) }).then(instance => {
+  startServer({ root: value('--data'), resultsRoot: value('--results-dir'), open: !args.includes('--no-open'), port: Number(value('--port') || 0) }).then(instance => {
     if (instance.existing) return;
     console.log(`Симулятор экзамена запущен: ${instance.url} (доступ только с этого компьютера).`);
     for (const sig of ['SIGINT','SIGTERM']) process.once(sig, () => instance.close().then(() => process.exit(0)));

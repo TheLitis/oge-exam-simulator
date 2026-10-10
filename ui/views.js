@@ -52,7 +52,7 @@ export function home(s) {
       <button class="text-button demo-button" data-action="demo">Демонстрационный вариант ${icon('arrow')}</button>
       ${s.exam ? `<div class="loaded-exam"><strong>${esc(s.exam.title)}</strong><button class="primary" data-action="registration">Продолжить ${icon('arrow')}</button></div>` : ''}
     </div>
-    <footer class="home-footer">${icon('lock')} Данные сохраняются на этом компьютере.<span>${esc(s.version)}</span></footer>
+    <footer class="home-footer"><button class="text-button small" data-action="open-results" title="Открыть папку результатов">${icon('folder')} Результаты</button><span>${esc(s.version)}</span></footer>
   </main>`;
 }
 export function registration(s) {

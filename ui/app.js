@@ -288,6 +288,7 @@ const actions = {
   },
   'download-result': async () => { await download('/api/result', `OGE_${state.data.session.candidate.registration}_results.zip`); toast('Архив передан в загрузки браузера. Основная копия остаётся в папке результатов.'); },
   'open-folder': async () => { await request('/api/open-folder', {}); },
+  'open-results': async () => { await request('/api/open-folder', { root: true }); },
   'retry-export': async () => { toast('Повторяем экспорт…', false, true); state.data.session = await request('/api/export/retry', {}); render(); toast(state.data.session.archiveReady ? 'Архив сформирован.' : 'Экспорт пока не завершён.', !state.data.session.archiveReady); },
   dismiss: async () => { state.data = await request('/api/dismiss', {}); state.mode = 'home'; render(); },
   quit: async () => {

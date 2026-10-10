@@ -2,14 +2,16 @@
 const { performance } = require('node:perf_hooks');
 const { fs, fsp, path, crypto, LIMITS, UserError, check, mkdir, json, readJson, inside, safeName, hashFile, boundedCopy, extractPackage, writeZip, rasterMime } = require('./io.cjs');
 const M = require('./model.cjs');
+const { migrateLegacyResults } = require('./results.cjs');
 const clone = value => structuredClone(value);
 const iso = ms => new Date(ms).toISOString();
 const html = value => String(value ?? '').replace(/[&<>"']/g, c => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[c]));
 const csv = value => '"' + String(value ?? '').replace(/^[=+@\-\t\r]/, x => "'" + x).replace(/"/g, '""') + '"';
 
 class ExamService {
-  constructor(root, { now = Date.now, monotonic = () => performance.now() } = {}) {
+  constructor(root, { now = Date.now, monotonic = () => performance.now(), resultsRoot } = {}) {
     this.root = path.resolve(root); this.now = now; this.monotonic = monotonic;
+    this.resultsRoot = path.resolve(resultsRoot || this.dir('results'));
     this.config = {}; this.editor = null; this.exam = null; this.attempt = null;
     this.lastCheckpoint = 0; this.nextActivationAt = 0; this.badCodes = 0;
     this.lastError = null; this.recovered = false;
@@ -17,12 +19,15 @@ class ExamService {
   dir(...parts) { return path.join(this.root, ...parts); }
   attemptDir() { return this.dir('sessions', this.attempt.id); }
   async init() {
-    for (const p of ['', 'editor/assets', 'exams', 'sessions', 'results', 'exports', 'incoming']) await mkdir(this.dir(p));
+    for (const p of ['', 'editor/assets', 'exams', 'sessions', 'exports', 'incoming']) await mkdir(this.dir(p));
+    try { await mkdir(this.resultsRoot); }
+    catch { this.lastError = 'Не удалось открыть папку результатов. Сеансы сохранены; проверьте доступ к папке Документы.'; }
     // Incoming uploads are never submitted answers and are safe to discard after a restart.
     for (const n of await fsp.readdir(this.dir('incoming'))) await fsp.rm(this.dir('incoming', n), { force: true });
     try { this.config = await readJson(this.dir('config.json'), true); } catch (e) { if (e.code !== 'ENOENT') this.lastError = 'Настройки повреждены; выполнен поиск сохранённого сеанса.'; }
     try { this.editor = M.validateShape(await readJson(this.dir('editor/manifest.json'), true)); }
     catch { this.editor = M.blankExam(); await this.persistEditor(this.editor); }
+    await this.migrateResults();
     if (/^[a-f0-9-]{36}$/.test(this.config.examId ?? '')) {
       try {
         this.examDir = this.dir('exams', this.config.examId);
@@ -69,6 +74,26 @@ class ExamService {
     M.validateShape(next); await json(this.dir('editor/manifest.json'), next, true); this.editor = next;
   }
   async persistConfig(patch) { const next = { ...this.config, ...patch }; await json(this.dir('config.json'), next, true); this.config = next; }
+  async migrateResults() {
+    if (this.resultsRoot === this.dir('results')) return;
+    try {
+      const moved = await migrateLegacyResults(this.dir('results'), this.resultsRoot);
+      if (!moved.size) return;
+      for (const id of await fsp.readdir(this.dir('sessions'))) {
+        if (!/^[a-f0-9-]{36}$/.test(id)) continue;
+        const file = this.dir('sessions', id, 'session.json');
+        let session;
+        try { session = await readJson(file, true); } catch { continue; }
+        if (session.status !== 'finished') continue;
+        const resultDir = moved.get(session.resultDir) || session.resultDir;
+        const archivePath = moved.get(session.archivePath) || session.archivePath;
+        if (resultDir !== session.resultDir || archivePath !== session.archivePath)
+          await json(file, { ...session, resultDir, archivePath }, true);
+      }
+    } catch {
+      this.lastError = 'Не удалось перенести прежние результаты в Документы. Оригиналы сохранены; проверьте свободное место и доступ к папке.';
+    }
+  }
   theme() { return this.config.theme === 'dark' ? 'dark' : 'light'; }
   async setTheme(theme) {
     check(theme === 'light' || theme === 'dark', 'Некорректная тема.');
@@ -97,7 +122,7 @@ class ExamService {
       statuses, savedCount: statuses.filter(s => s.saved).length, dirtyCount: statuses.filter(s => s.dirty).length,
       resultDir: a.resultDir || null, archiveReady: !!a.archivePath, exportError: a.exportError || null, recovered: this.recovered };
   }
-  state() { return { version: '1.0.0', theme: this.theme(), exam: this.publicExam(this.exam), editor: this.attempt?.status === 'active' ? null : this.publicExam(this.editor), session: this.sessionView(), resultsRoot: this.dir('results'), warning: this.lastError }; }
+  state() { return { version: '1.0.0', theme: this.theme(), exam: this.publicExam(this.exam), editor: this.attempt?.status === 'active' ? null : this.publicExam(this.editor), session: this.sessionView(), resultsRoot: this.resultsRoot, warning: this.lastError }; }
   async newEditor() { this.assertIdle(); await this.persistEditor(M.blankExam()); return this.publicExam(this.editor); }
   async updateEditor({ title, code, generateCode = false } = {}) {
     this.assertIdle(); const next = clone(this.editor); next.published = false;
@@ -249,7 +274,7 @@ class ExamService {
   async exportResults() {
     check(this.attempt?.status === 'finished', 'Экзамен ещё не завершён.');
     const a = clone(this.attempt), suffix = `${new Date(a.startedAt).toISOString().slice(0,10)}_${a.candidate.registration}_${a.id.slice(0,8)}`;
-    let final = this.dir('results', `OGE_${suffix}`);
+    let final = path.join(this.resultsRoot, `OGE_${suffix}`);
     if (fs.existsSync(final)) final += `_${crypto.randomUUID().slice(0,6)}`;
     const temp = `${final}.tmp`, zipPath = `${final}.zip`;
     try {

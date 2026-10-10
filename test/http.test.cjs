@@ -99,6 +99,25 @@ test('full HTTP flow: activate, save, download supplied file, upload, confirm, Z
   assert.equal(await zip.file('files/task-16/answer.py').async('string'),'print(42)');
   assert.equal((await post('/api/save',{id:1,text:'late'})).status,400);
 });
+
+test('explicit result directory is used by HTTP export and download after restart', async t => {
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'oge-http-visible-'));
+  const resultsRoot = path.join(root, 'Документы', 'Результаты');
+  let app = await startServer({ root, resultsRoot, open:false, lock:false });
+  t.after(async () => { await app.close(); await fsp.rm(root, { recursive:true, force:true }); });
+  await app.service.importExam(path.join(__dirname, '../examples/demo.oge'));
+  await app.service.start(PERSON, 'DEMO-2026'); await app.service.saveAnswer(1, '42'); await app.service.finish();
+  const archive = await fsp.readFile(app.service.attempt.archivePath);
+  assert.equal(path.dirname(app.service.attempt.archivePath), resultsRoot);
+  await app.close(); app = await startServer({ root, resultsRoot, open:false, lock:false });
+  const headers = { Authorization:`Bearer ${app.key}` };
+  const state = await (await fetch(app.url + '/api/state', { headers })).json();
+  assert.equal(state.value.resultsRoot, resultsRoot); assert.equal(state.value.session.archiveReady, true);
+  const response = await fetch(app.url + '/api/result', { headers });
+  assert.equal(response.status, 200);
+  assert.deepEqual(Buffer.from(await response.arrayBuffer()), archive);
+  assert.equal((await fsp.readdir(resultsRoot)).length, 2);
+});
 test('upload rejects path traversal in filenames',async t=>{
   const {app,headers}=await server(t);
   const res=await fetch(app.url+'/api/upload?kind=image&task=1&name=..%2Fevil.png',{method:'POST',headers,body:'x'});assert.equal(res.status,400);
