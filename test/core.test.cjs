@@ -194,6 +194,18 @@ test('restart restores saved and unsaved data without resetting timer', async t 
   assert.equal(restored.remaining(),8910000); assert.equal(restored.task(1).savedText,'12'); assert.equal(restored.task(2).text,'13');
   assert.equal(restored.recovered,true);
 });
+
+test('scanned recovery repairs config so finished results survive another restart', async t => {
+  const {s,root,clock}=await context(t); await s.saveAnswer(1,'012');
+  await fsp.unlink(path.join(root,'config.json')); await fsp.unlink(path.join(root,'config.json.bak'));
+  const restored=new ExamService(root,clock); await restored.init();
+  assert.equal(restored.attempt.id,s.attempt.id); assert.equal(restored.recovered,true);
+  assert.equal((await I.readJson(path.join(root,'config.json'))).attemptId,s.attempt.id);
+  await restored.finish();
+  const afterFinish=new ExamService(root,clock); await afterFinish.init();
+  assert.equal(afterFinish.attempt.id,s.attempt.id); assert.equal(afterFinish.attempt.status,'finished');
+  assert.equal(afterFinish.attempt.answers[1].text,'012'); assert.equal(afterFinish.attempt.archivePath,restored.attempt.archivePath);
+});
 test('restart after deadline automatically completes and exports session', async t => {
   const {s,root,clock,advance}=await context(t); await s.saveAnswer(1,'12'); advance(10000000);
   const restored=new ExamService(root,clock); await restored.init(); assert.equal(restored.attempt.finishReason,'timeout'); assert.ok(restored.attempt.archivePath);

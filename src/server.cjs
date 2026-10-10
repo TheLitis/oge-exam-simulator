@@ -51,6 +51,35 @@ async function sendFile(res, file, mime, name) {
   if (name) headers['Content-Disposition'] = `attachment; filename="download"; filename*=UTF-8''${encodeURIComponent(name).replace(/['()*]/g, x => '%' + x.charCodeAt(0).toString(16))}`;
   res.writeHead(200, headers); await pipeline(fs.createReadStream(file), res);
 }
+async function instanceResponds(info) {
+  // A PID can be reused after a crash or an OS restart. Confirm that its saved
+  // address still belongs to this authenticated service before opening it.
+  return new Promise((resolve, reject) => {
+    let request, settled = false;
+    const unavailable = () => new UserError('Не удалось проверить запущенное приложение. Повторите запуск через несколько секунд.');
+    const finish = (error, alive) => {
+      if (settled) return;
+      settled = true; clearTimeout(timeout); request?.destroy();
+      if (error) reject(error); else resolve(alive);
+    };
+    const timeout = setTimeout(() => finish(unavailable()), 2000);
+    request = http.get(`${info.url}/api/health`, { headers: { Authorization: `Bearer ${info.key}` } }, res => {
+      if ([400, 401, 403, 404].includes(res.statusCode)) return finish(null, false);
+      if (res.statusCode !== 200) return finish(unavailable());
+      let data = '';
+      res.on('data', chunk => { data += chunk; if (data.length > 1024) finish(unavailable()); });
+      res.on('error', () => finish(unavailable()));
+      res.on('end', () => {
+        let value; try { value = JSON.parse(data); } catch { return finish(unavailable()); }
+        // Older builds returned only {ok:true}; their token still authenticates
+        // this probe. New builds also identify the process that answered.
+        if (value?.ok !== true) return finish(unavailable());
+        finish(null, value.pid === undefined || value.pid === info.pid);
+      });
+    });
+    request.on('error', e => finish(e.code === 'ECONNREFUSED' ? null : unavailable(), false));
+  });
+}
 
 async function startServer({ root, open = true, port = 0, lock = true, clock } = {}) {
   process.umask(0o077);
@@ -70,7 +99,9 @@ async function startServer({ root, open = true, port = 0, lock = true, clock } =
       if (info?.pid) { try { process.kill(info.pid, 0); alive = true; } catch {} }
       if (alive) {
         check(/^http:\/\/127\.0\.0\.1:\d+$/.test(info.url) && /^[a-f0-9]{64}$/.test(info.key), 'Повреждён файл запущенного приложения.');
-        if (open) await openBrowser(`${info.url}/#${info.key}`); return { existing: true, ...info };
+        if (await instanceResponds(info)) {
+          if (open) await openBrowser(`${info.url}/#${info.key}`); return { existing: true, ...info };
+        }
       }
       await fsp.rm(lockDir, { recursive: true, force: true }); await fsp.mkdir(lockDir, { mode: 0o700 });
     }
@@ -113,7 +144,7 @@ async function startServer({ root, open = true, port = 0, lock = true, clock } =
         }
         if (url.pathname === '/api/package') { const file = await serial(() => service.exportFile(url.searchParams.get('id'))); await sendFile(res, file, 'application/zip', 'exam.oge'); return; }
         if (url.pathname === '/api/result') { const a = service.attempt; check(a?.status === 'finished' && a.archivePath, 'Итоговый ZIP пока недоступен.'); await sendFile(res, a.archivePath, 'application/zip', path.basename(a.archivePath)); return; }
-        if (url.pathname === '/api/health') return reply(res, { ok: true });
+        if (url.pathname === '/api/health') return reply(res, { ok: true, pid: process.pid });
         throw new UserError('Не найдено.', 404);
       }
       check(req.method === 'POST', 'Недопустимый метод.');

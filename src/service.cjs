@@ -42,6 +42,7 @@ class ExamService {
     if (candidates.length) {
       this.attempt = candidates[0]; this.sessionExam = await readJson(this.dir('sessions', this.attempt.id, 'exam/manifest.json'));
       await M.validateFiles(this.sessionExam, this.dir('sessions', this.attempt.id, 'exam'), true);
+      if (this.config.attemptId !== this.attempt.id) await this.persistConfig({ attemptId: this.attempt.id });
       this.setAnchor(); this.recovered = this.attempt.status === 'active';
       if (this.attempt.status === 'active') await this.pulse(true);
       else if (!this.attempt.archivePath || !fs.existsSync(this.attempt.archivePath)) await this.exportResults();

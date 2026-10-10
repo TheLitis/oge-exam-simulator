@@ -65,6 +65,36 @@ test('single instance opens the same running service without acquiring second ti
     const two=await startServer({root,open:false});assert.equal(two.existing,true);assert.equal(two.url,one.url);
   } finally {await one.close();await fsp.rm(root,{recursive:true,force:true});}
 });
+
+test('stale instance lock with a reused live PID starts a new service',async t=>{
+  const root=await fsp.mkdtemp(path.join(os.tmpdir(),'oge-stale-lock-'));
+  let app;
+  t.after(async()=>{await app?.close();await fsp.rm(root,{recursive:true,force:true});});
+  // Allocate an unused loopback address, then close it to model a dead server.
+  const dead=require('node:http').createServer();
+  await new Promise(resolve=>dead.listen(0,'127.0.0.1',resolve));
+  const deadUrl=`http://127.0.0.1:${dead.address().port}`;
+  await new Promise(resolve=>dead.close(resolve));
+  await fsp.mkdir(path.join(root,'instance.lock'));
+  await fsp.writeFile(path.join(root,'instance.lock/connection.json'),JSON.stringify({pid:process.pid,url:deadUrl,key:'a'.repeat(64)}));
+  app=await startServer({root,open:false});
+  assert.notEqual(app.existing,true); assert.equal(app.service.root,root);
+  const health=await fetch(app.url+'/api/health',{headers:{Authorization:`Bearer ${app.key}`}});
+  assert.equal(health.status,200); assert.deepEqual(await health.json(),{ok:true,pid:process.pid});
+});
+
+test('uncertain instance health preserves the lock instead of starting another timer',async t=>{
+  const root=await fsp.mkdtemp(path.join(os.tmpdir(),'oge-uncertain-lock-'));
+  const uncertain=require('node:http').createServer((req,res)=>{res.writeHead(200,{'Content-Type':'application/json'});res.end('null');});
+  await new Promise(resolve=>uncertain.listen(0,'127.0.0.1',resolve));
+  t.after(async()=>{await new Promise(resolve=>uncertain.close(resolve));await fsp.rm(root,{recursive:true,force:true});});
+  await fsp.mkdir(path.join(root,'instance.lock'));
+  const file=path.join(root,'instance.lock/connection.json');
+  const original=JSON.stringify({pid:process.pid,url:`http://127.0.0.1:${uncertain.address().port}`,key:'a'.repeat(64)});
+  await fsp.writeFile(file,original);
+  await assert.rejects(startServer({root,open:false}),/Не удалось проверить запущенное приложение/);
+  assert.equal(await fsp.readFile(file,'utf8'),original);
+});
 test('server finishes on its own without browser polling',async t=>{
   const root=await fsp.mkdtemp(path.join(os.tmpdir(),'oge-no-browser-'));let offset=0;
   const app=await startServer({root,open:false,lock:false,clock:{now:()=>Date.now()+offset,monotonic:()=>performance.now()+offset}});
