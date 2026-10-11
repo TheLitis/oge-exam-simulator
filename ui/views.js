@@ -48,13 +48,14 @@ export function home(s) {
       ${s.exam ? `<div class="loaded-exam"><strong>${esc(s.exam.title)}</strong><button class="primary" data-action="registration">Продолжить ${icon('arrow')}</button></div>` : ''}
       <div class="home-utilities">
         <button class="text-button" data-action="editor">${icon('edit')} Редактор экзамена ${icon('arrow')}</button>
-        <button class="text-button" data-action="open-results" title="Папка результатов · доступ для учителя">${icon('folder')} Результаты ${icon('arrow')}</button>
+        <button class="text-button" data-action="open-results" title="Папка результатов">${icon('folder')} Результаты ${icon('arrow')}</button>
       </div>
     </div>
     <footer class="home-footer"><span>${esc(s.version)}</span></footer>
   </main>`;
 }
 export function registration(s) {
+  const protectionMissing = s.exam?.resultsProtected === false && !s.teacher?.resultProtection?.ready;
   return header('Регистрация участника', `<button class="text-button" data-action="home">${icon('back')} На главную</button>`) + `<main class="registration">
     <div class="page-heading"><h1>Регистрация</h1><p>Таймер начнётся после активации.</p></div>
     <div class="registration-grid">
@@ -65,7 +66,8 @@ export function registration(s) {
         <p class="form-note">Для тренировки используйте вымышленные данные.</p>
         <div class="activation-box"><label>Код активации<input name="code" type="text" placeholder="Введите код" maxlength="128" autocomplete="off" autocapitalize="off" spellcheck="false" required></label>
         </div>
-        <button class="primary wide" type="submit">Начать экзамен ${icon('arrow')}</button>
+        ${protectionMissing ? '<p class="form-error">Учителю нужно настроить защиту результатов или заново экспортировать экзамен.</p>' : ''}
+        <button class="primary wide" type="submit" ${protectionMissing ? 'disabled' : ''}>Начать экзамен ${icon('arrow')}</button>
         <p id="registration-error" class="form-error" role="alert"></p>
       </form>
       <aside class="registration-summary">
@@ -188,13 +190,15 @@ export function checkerPanel(task, draft, checking = {}) {
 }
 export function editor(s, selected, currentCode = '', checkerDraft) {
   const e = s.editor, t = e.tasks[selected - 1];
+  const resultProtection = s.teacher?.resultProtection;
   const complete = e.tasks.filter(x => x.images.length && (!(x.requiresResources ?? (x.id >= 11 && x.id <= 14)) || x.resources.length)).length;
   return header('Редактор экзамена', `<button class="text-button" data-action="home">${icon('back')} На главную</button><button class="icon-button" data-action="lock-teacher" title="Закрыть режим учителя" aria-label="Закрыть режим учителя">${icon('lock')}</button>`) + `<main class="editor-page">
     <div class="editor-top"><h1>Редактор экзамена</h1><div class="button-row"><button class="secondary" data-action="export-project">Сохранить проект</button><button class="primary" data-action="export-exam">${icon('download')} Экспорт экзамена</button></div></div>
     <div class="editor-settings"><label>Название<input id="exam-title" maxlength="160" value="${esc(e.title)}"></label>
       <div class="code-settings"><label>Код активации<input id="editor-code" value="${esc(currentCode)}" maxlength="128" placeholder="${e.hasActivation ? 'Код установлен' : 'Введите код'}" autocomplete="off"></label><button class="icon-button" data-action="generate-code" title="Сгенерировать новый код" aria-label="Сгенерировать код">${icon('refresh')}</button><button class="secondary compact" data-action="set-code">Применить</button></div>
     </div>
-    <div class="editor-toolbar"><div class="button-row"><button class="secondary" data-action="import-images">${icon('folder')} Импорт из папки</button><button class="text-button" data-action="import-images-files">Выбрать изображения</button></div><div class="button-row"><button class="text-button" data-action="open-review">${icon('check')} Проверить работу</button><button class="text-button" data-action="open-project">Открыть проект</button><button class="text-button danger-text" data-action="new-project">Новый проект</button></div></div>
+    <div class="editor-toolbar"><div class="button-row"><button class="secondary" data-action="import-images">${icon('folder')} Импорт из папки</button><button class="text-button" data-action="import-images-files">Выбрать изображения</button></div><div class="button-row"><button class="text-button" data-action="open-review">${icon('check')} Открыть работу</button><button class="text-button" data-action="open-project">Открыть проект</button><button class="text-button danger-text" data-action="new-project">Новый проект</button></div></div>
+    <details class="result-key-panel"><summary><span>${icon('lock')} Ключ результатов</span><span class="small muted">${resultProtection?.migrationPending ? 'Обработка прежних работ' : resultProtection?.ready ? 'Готов' : 'Не настроен'}</span></summary><div class="result-key-body"><p>Сохраните ключ отдельно от компьютера ученика. Для открытия работ на другом компьютере импортируйте его и введите пароль, заданный при сохранении.</p><div class="button-row"><button class="secondary compact" data-action="download-result-key" ${resultProtection?.ready ? '' : 'disabled'}>${icon('download')} Сохранить ключ</button><button class="secondary compact" data-action="import-result-key">${icon('upload')} Импортировать ключ</button></div></div></details>
     <p class="import-note"><strong>${complete} / 16</strong> заданий готово</p>
     <div class="editor-layout">
       <nav class="editor-nav" aria-label="Задания редактора">${e.tasks.map(x => `<button data-action="editor-task" data-id="${x.id}" class="${x.id === selected ? 'selected' : ''}" aria-current="${x.id === selected ? 'step' : 'false'}" aria-label="Задание ${x.id}: ${x.images.length} изображений${x.hasResources ? `, ${x.resources.length} файлов` : ''}"><span class="editor-task-id">${pad(x.id)}</span><span><strong>${x.kind === 'short' ? 'Краткий ответ' : 'Ответ файлом'}</strong><small>${x.images.length} изобр.${x.hasResources ? ` · ${x.resources.length} файл.` : ''}</small></span>${x.images.length && (!(x.requiresResources ?? (x.id >= 11 && x.id <= 14)) || x.resources.length) ? icon('check','ready-check') : '<span class="empty-dot"></span>'}</button>`).join('')}</nav>
@@ -226,7 +230,7 @@ export function review(s, work, assessment, allowUnmatched = false) {
   const summary = assessment?.summary;
   return header('Проверка работы', `<button class="text-button" data-action="back-editor">${icon('back')} В редактор</button><button class="icon-button" data-action="lock-teacher" title="Закрыть режим учителя" aria-label="Закрыть режим учителя">${icon('lock')}</button>`) + `<main class="review-page"><div class="review-heading"><div><h1>Проверка работы</h1><p>${esc(work.title)}</p></div><button class="secondary" data-action="open-review">${icon('folder')} Другая работа</button></div>
     <section class="review-candidate"><div><h2>${esc(work.surname)} ${esc(work.name)}</h2><p>Бланк ${esc(work.registration)}</p></div><span>${work.savedCount} / 16 ответов${work.draftCount ? ` · Черновиков: ${work.draftCount}` : ''}</span></section>
-    ${work.contextMatch !== true ? `<div class="review-context"><p>${work.contextMatch === false ? 'Условия работы отличаются от открытого проекта. Сопоставьте вариант перед проверкой.' : 'В этом ZIP нет состава условий. Сопоставьте вариант с проектом перед проверкой.'}</p><label class="check-option"><input id="review-allow-unmatched" type="checkbox" ${allowUnmatched ? 'checked' : ''}> Использовать текущие эталоны</label></div>` : ''}
+    ${work.contextMatch !== true ? `<div class="review-context"><p>${work.contextMatch === false ? 'Условия работы отличаются от открытого проекта. Сопоставьте вариант перед проверкой.' : 'В этой работе нет состава условий. Сопоставьте вариант с проектом перед проверкой.'}</p><label class="check-option"><input id="review-allow-unmatched" type="checkbox" ${allowUnmatched ? 'checked' : ''}> Использовать текущие эталоны</label></div>` : ''}
     <div class="review-actions"><button class="primary" data-action="check-review" ${work.contextMatch !== true && !allowUnmatched ? 'disabled' : ''}>${icon('check')} ${assessment ? 'Проверить снова' : 'Проверить'}</button>${assessment ? `<button class="secondary" data-action="download-review">${icon('download')} Скачать отчёт</button>` : ''}<span class="small muted">Проверяются только сданные ответы.</span></div>
     ${summary ? `<div class="review-summary" aria-label="Результат автопроверки"><div class="correct"><strong>${summary.correct}</strong><span>Верно</span></div><div class="incorrect"><strong>${summary.incorrect}</strong><span>Неверно</span></div><div><strong>${summary.manual}</strong><span>Вручную</span></div><div><strong>${summary.unanswered}</strong><span>Без ответа</span></div>${summary.error || summary.unavailable ? `<div class="review-summary-error"><strong>${summary.error + summary.unavailable}</strong><span>Не проверено</span></div>` : ''}</div>` : ''}
     <div class="review-task-list">${(assessment?.tasks || work.answers).map(task => { const answer = work.answers.find(a => a.id === task.id) || task; return `<section class="review-task"><div class="review-task-title"><h3>Задание ${pad(task.id)}</h3>${task.status ? `<span class="review-status ${esc(task.status)}">${esc(reviewStatuses[task.status] || task.status)}</span>` : ''}</div>${answer.kind === 'short' ? `<p class="review-answer">${answer.text ? esc(answer.text) : '<span class="muted">Ответ не сдан</span>'}</p>` : `<p class="review-file">${icon('file')} ${answer.fileName ? esc(answer.fileName) : '<span class="muted">Файл не сдан</span>'}</p>`}${task.message ? `<p class="review-message">${esc(task.message)}</p>` : ''}${task.actual !== undefined && answer.kind !== 'short' ? `<details class="review-details"><summary>Полученный результат</summary><pre>\n${esc(task.actual)}</pre></details>` : ''}${task.tests?.length ? `<details class="review-details"><summary>Тесты программы</summary>${task.tests.map(reviewTest).join('')}</details>` : ''}${reviewCriteria(task.criteria)}</section>`; }).join('')}</div>
@@ -234,12 +238,13 @@ export function review(s, work, assessment, allowUnmatched = false) {
 }
 export function result(s) {
   const a = s.session;
+  const candidate = a.candidate?.surname || a.candidate?.name;
   return header('Экзамен завершён') + `<main class="result-page"><div class="result-mark">${icon('check')}</div><h1>Экзамен завершён</h1>${a.finishReason === 'timeout' ? '<p class="result-subtitle">Время истекло.</p>' : ''}
-    <section class="result-card"><div class="result-top"><div><span class="muted small">${esc(a.title)}</span><h2>${esc(a.candidate.surname)} ${esc(a.candidate.name)}</h2><p>Бланк ${esc(a.candidate.registration)}</p></div><div class="result-score"><strong>${a.savedCount}<span> / 16</span></strong><span>сохранено ответов</span></div></div>
+    <section class="result-card"><div class="result-top"><div>${candidate ? `<span class="muted small">${esc(a.title)}</span><h2>${esc(a.candidate.surname)} ${esc(a.candidate.name)}</h2>${a.candidate.registration ? `<p>Бланк ${esc(a.candidate.registration)}</p>` : ''}` : `<h2>${esc(a.title || 'Экзамен завершён')}</h2>`}</div><div class="result-score"><strong>${a.savedCount}<span> / 16</span></strong><span>сохранено ответов</span></div></div>
       <div class="result-tasks">${a.statuses.map(t => `<span class="${t.saved ? 'saved' : ''}" title="Задание ${t.id}: ${t.saved ? 'сохранено' : 'нет ответа'}">${pad(t.id)}${t.saved ? icon('check') : ''}</span>`).join('')}</div>
       ${a.dirtyCount ? `<p class="draft-warning">Черновиков: ${a.dirtyCount}. Они сохранены отдельно от сданных ответов.</p>` : ''}<hr>
-      ${a.archiveReady ? `<h3>${icon('folder')} Результаты сохранены</h3><div class="button-row"><button class="primary" data-action="download-result">${icon('download')} Скачать ZIP</button><button class="secondary" data-action="open-folder">Открыть папку</button></div><details class="result-location"><summary>Расположение файлов</summary><p class="path-text">${esc(a.resultDir)}</p></details>` : `<h3>Ответы сохранены в локальном сеансе</h3><p class="form-error">${esc(a.exportError || 'Не удалось завершить экспорт. Проверьте свободное место.')}</p><button class="primary" data-action="retry-export">${icon('refresh')} Повторить экспорт</button>`}
-      <p class="privacy-note">${icon('lock')} ZIP содержит регистрационные данные. Передайте его организатору.</p>
+      ${a.archiveReady ? `<h3>${icon('folder')} Результаты сохранены</h3><div class="button-row"><button class="primary" data-action="download-result">${icon('download')} Скачать работу</button><button class="secondary" data-action="open-folder">Открыть папку</button></div><details class="result-location"><summary>Расположение файлов</summary><p class="path-text">${esc(a.resultDir)}</p></details>` : `<h3>Ответы сохранены в локальном сеансе</h3><p class="form-error">${esc(a.exportError || 'Не удалось завершить экспорт. Проверьте свободное место.')}</p><button class="primary" data-action="retry-export">${icon('refresh')} Повторить экспорт</button>`}
+      ${a.archiveReady ? `<p class="privacy-note">${icon('lock')} ${a.encrypted ? 'Работа зашифрована. Передайте файл организатору — он откроет его с ключом учителя.' : 'Работа содержит регистрационные данные и не зашифрована. Передайте её только организатору.'}</p>` : ''}
     </section><button class="text-button" data-action="dismiss">На главную ${icon('arrow')}</button>
   </main>`;
 }

@@ -123,7 +123,7 @@ async function ensureTeacher() {
   const setup = !state.data.teacher?.configured;
   const accepted = await new Promise(resolve => {
     let submitting = false;
-    modal.innerHTML = `<form id="teacher-access-form" class="teacher-access-form" autocomplete="off"><h2 id="modal-title">${setup ? 'Пароль учителя' : 'Вход для учителя'}</h2>${setup ? '<p>Задайте пароль перед работой с учениками. Он защищает проект и эталоны на этом компьютере.</p>' : ''}<label>Пароль<input name="password" type="password" minlength="10" maxlength="128" autocomplete="off" required autofocus></label>${setup ? '<label>Повторите пароль<input name="repeat" type="password" minlength="10" maxlength="128" autocomplete="off" required></label><p class="form-note">От 10 символов. Сохраните пароль: восстановление недоступно.</p>' : ''}<p id="teacher-access-error" class="form-error" role="alert"></p><div class="button-row"><button class="secondary" type="button" data-choice="cancel">Отмена</button><button class="primary" type="submit">${setup ? 'Сохранить' : 'Открыть'}</button></div></form>`;
+    modal.innerHTML = `<form id="teacher-access-form" class="teacher-access-form" autocomplete="off"><h2 id="modal-title">${setup ? 'Пароль учителя' : 'Вход для учителя'}</h2>${setup ? '<p>Он защищает проект, эталоны и ключ для открытия результатов.</p>' : ''}<label>Пароль<input name="password" type="password" minlength="10" maxlength="128" autocomplete="off" required autofocus></label>${setup ? '<label>Повторите пароль<input name="repeat" type="password" minlength="10" maxlength="128" autocomplete="off" required></label><p class="form-note">От 10 символов. Сохраните пароль: восстановление недоступно.</p>' : ''}<p id="teacher-access-error" class="form-error" role="alert"></p><div class="button-row"><button class="secondary" type="button" data-choice="cancel">Отмена</button><button class="primary" type="submit">${setup ? 'Сохранить' : 'Открыть'}</button></div></form>`;
     modal.returnValue = '';
     modal.onclick = e => { if (!submitting && e.target.closest('[data-choice="cancel"]')) modal.close('cancel'); };
     modal.oncancel = e => { if (submitting) e.preventDefault(); };
@@ -146,7 +146,10 @@ async function ensureTeacher() {
     };
     modal.showModal();
   });
-  if (accepted) await refresh();
+  if (accepted) {
+    await refresh();
+    if (state.data.teacher?.resultProtection?.migrationPending) toast('Прежние работы будут зашифрованы ключом учителя.');
+  }
   return accepted;
 }
 async function lockTeacher() {
@@ -154,9 +157,9 @@ async function lockTeacher() {
   finally { clearTeacherView(); state.mode = 'home'; if (state.data) render(); }
   await refresh();
 }
-function projectPassword(message) {
+function projectPassword(message, title = 'Пароль проекта') {
   return new Promise(resolve => {
-    modal.innerHTML = `<form><h2 id="modal-title">Пароль проекта</h2><p>${V.esc(message)}</p><label>Пароль<input name="password" type="password" minlength="10" maxlength="128" autocomplete="off" required autofocus></label><div class="button-row"><button type="button" class="secondary" data-choice="cancel">Отмена</button><button type="submit" class="primary">Открыть</button></div></form>`;
+    modal.innerHTML = `<form><h2 id="modal-title">${V.esc(title)}</h2><p>${V.esc(message)}</p><label>Пароль<input name="password" type="password" minlength="10" maxlength="128" autocomplete="off" required autofocus></label><div class="button-row"><button type="button" class="secondary" data-choice="cancel">Отмена</button><button type="submit" class="primary">Открыть</button></div></form>`;
     let password = null; modal.returnValue = '';
     modal.onclick = e => { if (e.target.closest('[data-choice="cancel"]')) modal.close('cancel'); };
     modal.onsubmit = e => { e.preventDefault(); password = e.target.elements.password.value; modal.close('ok'); };
@@ -175,6 +178,19 @@ async function importProject(file) {
     catch (e) {
       if (!['PROJECT_PASSWORD_REQUIRED', 'PROJECT_PASSWORD_INVALID'].includes(e.code)) throw e;
       password = await projectPassword(e.message); if (password === null) return null;
+    }
+  }
+}
+async function importResultKey(file) {
+  const route = `/api/upload?kind=result-key&name=${encodeURIComponent(file.name)}`;
+  const generation = teacherGeneration;
+  let password;
+  for (;;) {
+    assertTeacherGeneration(generation);
+    try { return currentResponse(await request(route, undefined, file, password ? { 'X-Project-Password': encodeURIComponent(password) } : {})); }
+    catch (e) {
+      if (!['RESULT_KEY_PASSWORD_REQUIRED', 'RESULT_KEY_PASSWORD_INVALID'].includes(e.code)) throw e;
+      password = await projectPassword(e.message, 'Пароль ключа'); if (password === null) return null;
     }
   }
 }
@@ -388,12 +404,12 @@ const actions = {
   },
   help: async () => {
     const sections = {
-      home: ['Справка', 'Откройте файл .oge или .zip от организатора. Для тренировки доступен демонстрационный вариант с кодом DEMO-2026.\n\nВ редакторе можно создать собственный вариант.'],
+      home: ['Справка', 'Откройте файл .oge или .zip от организатора. Для тренировки доступен демонстрационный вариант с кодом DEMO-2026. Перед его первым запуском учитель настраивает защиту результатов.\n\nВ редакторе можно создать собственный вариант.'],
       registration: ['Перед началом', 'Таймер начнётся после ввода данных и правильного кода активации. Для демонстрационного варианта: DEMO-2026.\n\nДля тренировки используйте вымышленные данные. Регистрация хранится на этом компьютере и не проверяется по государственным базам.'],
       exam: ['Работа с заданиями', 'В заданиях 1–12 введите краткий ответ. В заданиях 13–16 прикрепите файл. После каждого задания нажимайте «Сохранить» или Ctrl+Enter. Черновики не считаются сданными ответами.\n\nФайлы для работы доступны в заданиях 11–16. После изменения файла прикрепите его заново.\n\nТаймер не останавливается при закрытии окна или перезапуске.'],
-      editor: ['Подготовка варианта', 'Имена изображений: 1.1.png, 1.2.png, 2.1.png и так далее. Импорт из папки распределяет их по номеру задания. Порядок лексикографический: 1.10.png раньше 1.2.png. Для числового порядка используйте 1.01.png, 1.02.png.\n\nВ заданиях 11–14 исходные файлы обязательны; в 15–16 их можно добавить при необходимости. Установите код активации перед экспортом.\n\nАвтопроверка необязательна. Для краткого ответа добавьте допустимые ответы; для файла выберите текст, программу с тестами и необязательным эталонным кодом, таблицу или презентацию с критериями. Таблицы проверяются по сохранённым значениям и формулам; пересчёт формул не выполняется. Нажмите «Применить». При переходе к другому заданию, экспорте или проверке изменения также сохраняются.\n\n«Сохранить проект» сохраняет эталоны. «Экспорт экзамена» проверяет все 16 заданий и удаляет эталоны из файла для учеников.'],
-      review: ['Проверка работы', 'Откройте ZIP с результатами ученика из редактора проекта с эталонами. Проверяются только сданные ответы. Черновики не участвуют в проверке.\n\nПрограммы запускаются в изолированной среде с ограничениями. Недоступность среды или ошибка запуска отображаются отдельно. Задания без эталона проверяются учителем вручную.\n\nОтчёт можно скачать вместе с исходной работой. Итоговая оценка выставляется учителем.'],
-      result: ['Результаты', 'Папка и ZIP содержат сохранённые ответы, отдельно черновики и регистрационные данные. Архив не зашифрован: передавайте его только организатору.\n\nЧисло сохранённых ответов не является оценкой. Учитель может проверить работу в редакторе своего проекта.']
+      editor: ['Подготовка варианта', 'Имена изображений: 1.1.png, 1.2.png, 2.1.png и так далее. Импорт из папки распределяет их по номеру задания. Порядок лексикографический: 1.10.png раньше 1.2.png. Для числового порядка используйте 1.01.png, 1.02.png.\n\nВ заданиях 11–14 исходные файлы обязательны; в 15–16 их можно добавить при необходимости. Установите код активации перед экспортом.\n\nАвтопроверка необязательна. Для краткого ответа добавьте допустимые ответы; для файла выберите текст, программу с тестами и необязательным эталонным кодом, таблицу или презентацию с критериями. Таблицы проверяются по сохранённым значениям и формулам; пересчёт формул не выполняется. Нажмите «Применить». При переходе к другому заданию, экспорте или проверке изменения также сохраняются.\n\n«Сохранить проект» сохраняет эталоны. «Экспорт экзамена» проверяет все 16 заданий и удаляет эталоны из файла для учеников.\n\nСохраните ключ результатов отдельно от компьютера ученика. Для проверки работ на другом компьютере импортируйте ключ. Его резервная копия защищена паролем учителя, заданным при сохранении.'],
+      review: ['Проверка работы', 'Откройте работу .ogeresult или прежний ZIP из редактора проекта с эталонами. Для защищённой работы нужен ключ того учителя, которому она предназначена. На другом компьютере сначала импортируйте этот ключ.\n\nПроверяются только сданные ответы из открытой работы. Черновики не участвуют в проверке. Программы запускаются в изолированной среде с ограничениями. Недоступность среды или ошибка запуска отображаются отдельно. Задания без эталона проверяются учителем вручную.\n\nОтчёт можно скачать вместе с исходной работой. Итоговая оценка выставляется учителем.'],
+      result: ['Результаты', `${state.data.session?.encrypted ? 'Работа .ogeresult зашифрована. Передайте файл организатору: он откроет его в симуляторе с ключом учителя.' : 'Работа содержит ответы, черновики и регистрационные данные. Эта работа не зашифрована: передавайте её только организатору.'}\n\nЧисло сохранённых ответов не является оценкой. Для проверки учитель открывает работу в редакторе своего проекта.`]
     };
     const [title, message] = sections[state.mode] || sections.home;
     await new Promise(resolve => {
@@ -414,7 +430,7 @@ const actions = {
     clearTeacherView();
     state.mode = 'registration'; render(); toast('Вариант загружен. Введите регистрационные данные.');
   },
-  demo: async () => { state.data.exam = await request('/api/demo', {}); clearTeacherView(); state.mode = 'registration'; render(); toast('Код демонстрационного экзамена: DEMO-2026. Используйте вымышленные данные.'); },
+  demo: async () => { if (!await ensureTeacher()) return; state.data.exam = await request('/api/demo', {}); clearTeacherView(); state.mode = 'registration'; render(); toast('Код демонстрационного экзамена: DEMO-2026. Используйте вымышленные данные.'); },
   task: async el => navigate(Number(el.dataset.id)), previous: async () => navigate(state.task.id - 1), next: async () => navigate(state.task.id + 1),
   save,
   attach: async () => {
@@ -431,7 +447,7 @@ const actions = {
     await flushDraft(); await refresh(); if (state.data.session.status !== 'active') return;
     const a = state.data.session;
     if (!await ask('Завершить экзамен?', `Сохранено ответов: ${a.savedCount} из 16. Без ответа: ${16-a.savedCount}.\n${a.dirtyCount ? `Есть несохранённые изменения: ${a.dirtyCount}. ` : ''}Черновики попадут в отдельный раздел архива и не будут считаться сданными ответами.\nПосле завершения изменить ответы нельзя. Таймер продолжает идти, пока открыто это окно.`, 'Завершить экзамен', true)) return;
-    toast('Собираем папку и ZIP с результатами…', false, true);
+    toast('Сохраняем результаты…', false, true);
     state.data.session = await request('/api/finish', { confirm: true }); state.mode = 'result'; state.task = null; render(); toast('Экзамен завершён.');
   },
   fullscreen: async () => { if (document.fullscreenElement) await document.exitFullscreen(); else await document.documentElement.requestFullscreen(); },
@@ -483,6 +499,20 @@ const actions = {
     await flushEditor(); state.data.editor = currentResponse(await request('/api/editor/remove', { id: el.dataset.id })); invalidateReferencePreview(); render(); toast('Файл удалён из задания.');
   },
   'export-project': async () => exportEditor(false), 'export-exam': async () => exportEditor(true),
+  'download-result-key': async () => {
+    if (!await ensureTeacher()) return;
+    await download('/api/teacher/result-key', 'result-key.ogekeys');
+    toast('Ключ сохранён под паролем учителя. Храните копию отдельно от компьютера ученика.');
+  },
+  'import-result-key': async () => {
+    if (!await ensureTeacher()) return;
+    const generation = teacherGeneration;
+    const [file] = await pickFiles({ accept: '.ogekeys' }); if (!file) return;
+    assertTeacherGeneration(generation);
+    toast('Импортируем ключ…', false, true);
+    const result = currentResponse(await importResultKey(file)); if (!result) { toast('Импорт ключа отменён.'); return; }
+    await refresh(); render(); toast('Ключ импортирован. Можно открывать предназначенные ему работы.');
+  },
   'open-project': async () => {
     const [file] = await pickFiles({ accept: '.oge,.zip' }); if (!file) return;
     if (!await ask('Открыть другой проект?', 'Текущий локальный проект будет заменён. Ранее скачанные проекты и экзамены сохранятся.', 'Открыть')) return;
@@ -498,7 +528,7 @@ const actions = {
   'open-review': async () => {
     if (!await ensureTeacher()) return;
     if (state.mode === 'editor') await flushEditor();
-    const [file] = await pickFiles({ accept: '.zip' }); if (!file) return;
+    const [file] = await pickFiles({ accept: '.ogeresult,.zip' }); if (!file) return;
     toast('Открываем работу…', false, true);
     const work = currentResponse(await request(`/api/upload?kind=review&name=${encodeURIComponent(file.name)}`, undefined, file));
     state.review = work; state.assessment = null; state.allowUnmatched = false; state.mode = 'review'; render(); toast('Работа открыта.');
@@ -511,13 +541,11 @@ const actions = {
     render(); toast('Проверка завершена.');
   },
   'download-review': async () => { await download(`/api/review/report?id=${encodeURIComponent(state.review.id)}`, `OGE_${state.review.registration}_reviewed-results.zip`); toast('Отчёт передан в загрузки браузера.'); },
-  'download-result': async () => { await download('/api/result', `OGE_${state.data.session.candidate.registration}_results.zip`); toast('Архив передан в загрузки браузера. Основная копия остаётся в папке результатов.'); },
+  'download-result': async () => { await download('/api/result', state.data.session.archiveName || (state.data.session.encrypted ? 'result.ogeresult' : 'result.zip')); toast('Работа передана в загрузки браузера. Основная копия остаётся в папке результатов.'); },
   'open-folder': async () => { await request('/api/open-folder', {}); },
   'open-results': async () => {
-    if (!await ensureTeacher()) return;
     try { await request('/api/open-folder', { root: true }); }
     catch (error) { error.message += ` Папка: ${state.data.resultsRoot}`; throw error; }
-    finally { await lockTeacher(); }
   },
   'retry-export': async () => { toast('Повторяем экспорт…', false, true); state.data.session = await request('/api/export/retry', {}); render(); toast(state.data.session.archiveReady ? 'Архив сформирован.' : 'Экспорт пока не завершён.', !state.data.session.archiveReady); },
   dismiss: async () => { state.data = await request('/api/dismiss', {}); state.mode = 'home'; render(); },

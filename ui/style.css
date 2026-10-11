@@ -282,6 +282,17 @@ label { display: flex; flex-direction: column; gap: 8px; min-width: 0; color: va
 .code-settings > button { height: 46px; }
 .editor-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 18px 0 0; }
 .editor-toolbar .text-button, .editor-toolbar .secondary { font-size: 12px; }
+.result-key-panel { margin-top: 14px; width: fit-content; max-width: 100%; font-size: 12px; }
+.result-key-panel > summary { display: flex; align-items: center; gap: 24px; cursor: pointer; list-style: none; color: var(--muted); }
+.result-key-panel > summary::-webkit-details-marker { display: none; }
+.result-key-panel > summary > span:first-child { display: inline-flex; align-items: center; gap: 7px; }
+.result-key-panel > summary > span:first-child::after { content: '+'; margin-left: 2px; }
+.result-key-panel[open] > summary > span:first-child::after { content: '−'; }
+.result-key-panel > summary:hover { color: var(--accent); }
+.result-key-panel .icon { width: 15px; height: 15px; }
+.result-key-body { max-width: 600px; padding: 12px 0 4px; }
+.result-key-body > p { color: var(--muted); line-height: 1.6; margin-bottom: 12px; }
+.result-key-body .button-row { flex-wrap: wrap; }
 .import-note { margin: 18px 0 12px; color: var(--muted); font-size: 12px; }
 .import-note strong { color: var(--ink); }
 .editor-layout { display: grid; grid-template-columns: 202px minmax(0, 1fr); gap: 24px; align-items: start; }
