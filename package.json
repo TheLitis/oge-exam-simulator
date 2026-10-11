@@ -1,6 +1,6 @@
 {
   "name": "oge-exam-simulator",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Локальный симулятор ОГЭ по информатике: 16 заданий, редактор, активация, 150 минут, ZIP результатов.",
   "private": true,
   "license": "MIT",

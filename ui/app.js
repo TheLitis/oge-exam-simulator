@@ -3,7 +3,7 @@ const app = document.querySelector('#app');
 const modal = document.querySelector('#modal');
 let token = location.hash.slice(1) || sessionStorage.getItem('oge-key');
 if (token) { sessionStorage.setItem('oge-key', token); history.replaceState(null, '', location.pathname); }
-const state = { data: null, mode: 'home', task: null, editorTask: 1, editorCode: '', busy: false, zoom: 0, stopped: false };
+const state = { data: null, mode: 'home', task: null, editorTask: 1, editorCode: '', busy: false, zoom: 0, paperOriginal: false, stopped: false };
 const imageUrls = new Map();
 let toastTimer, draftTimer, metaTimer, pendingDraft = null, pendingTitle = null, draftChain = Promise.resolve(), polling = false, imageGeneration = 0;
 
@@ -15,6 +15,15 @@ function applyTheme(theme) {
     button.title = dark ? 'Включить светлую тему' : 'Включить ночную тему';
     button.setAttribute('aria-pressed', String(dark));
     button.innerHTML = V.icon(dark ? 'sun' : 'moon');
+  }
+}
+
+function applyPaper() {
+  document.documentElement.dataset.paper = state.paperOriginal ? 'original' : 'comfortable';
+  const button = app.querySelector('[data-action="paper"]');
+  if (button) {
+    button.setAttribute('aria-pressed', String(state.paperOriginal));
+    button.title = state.paperOriginal ? 'Приглушить яркость условия' : 'Показать оригинальную яркость условия';
   }
 }
 
@@ -67,7 +76,7 @@ async function run(fn, message) {
 function ask(title, message, confirm = 'Подтвердить', danger = false) {
   return new Promise(resolve => {
     if (modal.open) modal.close('cancel');
-    modal.innerHTML = `<h2 id="modal-title">${V.esc(title)}</h2><p>${V.esc(message)}</p><div class="button-row"><button class="secondary" data-choice="cancel" autofocus>Отмена</button><button class="${danger ? 'finish-button' : 'primary'}" data-choice="ok">${V.esc(confirm)}</button></div>`;
+    modal.innerHTML = `<h2 id="modal-title">${V.esc(title)}</h2><p>${V.esc(message)}</p><div class="button-row"><button class="secondary" data-choice="cancel" autofocus>Отмена</button><button class="primary${danger ? ' danger' : ''}" data-choice="ok">${V.esc(confirm)}</button></div>`;
     modal.returnValue = '';
     modal.onclick = e => { const b = e.target.closest('[data-choice]'); if (b) modal.close(b.dataset.choice); };
     modal.onclose = () => { resolve(modal.returnValue === 'ok'); modal.onclick = null; modal.onclose = null; };
@@ -110,6 +119,7 @@ function render(keepScroll = false) {
   else if (state.mode === 'registration') app.innerHTML = V.registration(s);
   else if (state.mode === 'result') app.innerHTML = V.result(s);
   else app.innerHTML = V.home(s);
+  applyPaper();
   document.querySelector('#task-content')?.scrollTo(0, oldScroll);
   const editorNav = document.querySelector('.editor-nav');
   if (editorNav) {
@@ -202,6 +212,7 @@ function applyZoom() {
   if (label) label.textContent = ['По ширине', '100%', '150%', '75%'][state.zoom];
 }
 const actions = {
+  paper: async () => { state.paperOriginal = !state.paperOriginal; applyPaper(); },
   theme: async () => {
     const theme = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';
     state.data.theme = await request('/api/theme', { theme });
@@ -212,8 +223,8 @@ const actions = {
     const sections = {
       home: ['Справка', 'Откройте файл .oge или .zip от организатора. Для тренировки доступен демонстрационный вариант с кодом DEMO-2026.\n\nВ редакторе можно создать собственный вариант.'],
       registration: ['Перед началом', 'Таймер начнётся после ввода данных и правильного кода активации. Для демонстрационного варианта: DEMO-2026.\n\nДля тренировки используйте вымышленные данные. Регистрация хранится на этом компьютере и не проверяется по государственным базам.'],
-      exam: ['Работа с заданиями', 'В заданиях 1–12 введите краткий ответ. В заданиях 13–16 прикрепите файл. После каждого задания нажимайте «Сохранить ответ» или Ctrl+Enter. Черновики не считаются сданными ответами.\n\nФайлы для работы доступны в заданиях 11–14. После изменения файла прикрепите его заново.\n\nТаймер не останавливается при закрытии окна или перезапуске.'],
-      editor: ['Подготовка варианта', 'Имена изображений: 1.1.png, 1.2.png, 2.1.png и так далее. Импорт из папки распределяет их по номеру задания. Порядок лексикографический: 1.10.png раньше 1.2.png. Для числового порядка используйте 1.01.png, 1.02.png.\n\nВ задания 11–14 добавьте исходные файлы. Установите код активации перед экспортом.\n\n«Сохранить проект» допускает незавершённый вариант. «Экспортировать экзамен» проверяет все 16 заданий.'],
+      exam: ['Работа с заданиями', 'В заданиях 1–12 введите краткий ответ. В заданиях 13–16 прикрепите файл. После каждого задания нажимайте «Сохранить» или Ctrl+Enter. Черновики не считаются сданными ответами.\n\nФайлы для работы доступны в заданиях 11–14. После изменения файла прикрепите его заново.\n\nТаймер не останавливается при закрытии окна или перезапуске.'],
+      editor: ['Подготовка варианта', 'Имена изображений: 1.1.png, 1.2.png, 2.1.png и так далее. Импорт из папки распределяет их по номеру задания. Порядок лексикографический: 1.10.png раньше 1.2.png. Для числового порядка используйте 1.01.png, 1.02.png.\n\nВ задания 11–14 добавьте исходные файлы. Установите код активации перед экспортом.\n\n«Сохранить проект» допускает незавершённый вариант. «Экспорт экзамена» проверяет все 16 заданий.'],
       result: ['Результаты', 'Папка и ZIP содержат сохранённые ответы, отдельно черновики и регистрационные данные. Архив не зашифрован: передавайте его только организатору.\n\nЧисло сохранённых ответов не является оценкой. Автоматическая проверка правильности не выполняется.']
     };
     const [title, message] = sections[state.mode] || sections.home;
@@ -240,7 +251,7 @@ const actions = {
     const [file] = await pickFiles(); if (!file) return;
     toast('Сохраняем копию выбранного файла…', false, true);
     state.task = await request(`/api/upload?kind=answer&task=${state.task.id}&name=${encodeURIComponent(file.name)}`, undefined, file);
-    await refresh(); render(true); toast('Файл прикреплён. Теперь нажмите «Сохранить ответ».');
+    await refresh(); render(true); toast('Файл прикреплён. Теперь нажмите «Сохранить».');
   },
   'clear-answer': async () => {
     if (!await ask('Очистить ответ?', 'Сохранённый ответ и черновик этого задания будут очищены. Исходный файл на вашем компьютере не изменится.', 'Очистить', true)) return;
@@ -293,7 +304,7 @@ const actions = {
   dismiss: async () => { state.data = await request('/api/dismiss', {}); state.mode = 'home'; render(); },
   quit: async () => {
     const active = state.data.session?.status === 'active';
-    if (!await ask('Закрыть приложение?', active ? 'Экзамен не будет сдан досрочно. Время не ставится на паузу: после повторного запуска сеанс восстановится, а просроченный экзамен завершится автоматически. Для сдачи сейчас нажмите «Завершить экзамен».' : 'Все уже сохранённые проекты и результаты останутся на этом компьютере.', 'Закрыть приложение')) return;
+    if (!await ask('Закрыть приложение?', active ? 'Экзамен не будет сдан досрочно. Время не ставится на паузу: после повторного запуска сеанс восстановится, а просроченный экзамен завершится автоматически. Для сдачи сейчас нажмите «Завершить».' : 'Все уже сохранённые проекты и результаты останутся на этом компьютере.', 'Закрыть приложение')) return;
     if (active) await flushDraft(); if (state.mode === 'editor') await flushMeta();
     await request('/api/quit', { confirm: true }); state.stopped = true;
     app.innerHTML = `<main class="loading"><h1>Приложение закрыто</h1><p>Эту вкладку можно закрыть. Для продолжения запустите симулятор через ярлык или start.sh.</p></main>`;

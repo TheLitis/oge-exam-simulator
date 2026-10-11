@@ -3,6 +3,7 @@ const { performance } = require('node:perf_hooks');
 const { fs, fsp, path, crypto, LIMITS, UserError, check, mkdir, json, readJson, inside, safeName, hashFile, boundedCopy, extractPackage, writeZip, rasterMime } = require('./io.cjs');
 const M = require('./model.cjs');
 const { migrateLegacyResults } = require('./results.cjs');
+const { version } = require('../package.json');
 const clone = value => structuredClone(value);
 const iso = ms => new Date(ms).toISOString();
 const html = value => String(value ?? '').replace(/[&<>"']/g, c => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[c]));
@@ -122,7 +123,7 @@ class ExamService {
       statuses, savedCount: statuses.filter(s => s.saved).length, dirtyCount: statuses.filter(s => s.dirty).length,
       resultDir: a.resultDir || null, archiveReady: !!a.archivePath, exportError: a.exportError || null, recovered: this.recovered };
   }
-  state() { return { version: '1.0.0', theme: this.theme(), exam: this.publicExam(this.exam), editor: this.attempt?.status === 'active' ? null : this.publicExam(this.editor), session: this.sessionView(), resultsRoot: this.resultsRoot, warning: this.lastError }; }
+  state() { return { version, theme: this.theme(), exam: this.publicExam(this.exam), editor: this.attempt?.status === 'active' ? null : this.publicExam(this.editor), session: this.sessionView(), resultsRoot: this.resultsRoot, warning: this.lastError }; }
   async newEditor() { this.assertIdle(); await this.persistEditor(M.blankExam()); return this.publicExam(this.editor); }
   async updateEditor({ title, code, generateCode = false } = {}) {
     this.assertIdle(); const next = clone(this.editor); next.published = false;

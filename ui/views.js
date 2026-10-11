@@ -20,6 +20,7 @@ export function icon(name, cls = '') {
     power: '<path d="M12 2v10M6 5a9 9 0 1 0 12 0"/>',
     moon: '<path d="M20.9 13.1A9 9 0 0 1 10.9 3.1a9 9 0 1 0 10 10z"/>',
     sun: '<circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M2 12h2M20 12h2m-3-9-1.4 1.4M7.4 16.6 6 18m12 0-1.4-1.4M7.4 7.4 6 6"/>',
+    contrast: '<circle cx="12" cy="12" r="9"/><path d="M12 3a9 9 0 0 1 0 18z" fill="currentColor" stroke="none"/>',
   };
   return `<svg class="icon ${cls}" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${paths[name] || paths.file}</svg>`;
 }
@@ -39,20 +40,17 @@ export function home(s) {
   return header() + warning(s) + `<main class="home">
     <div class="home-content">
       <div class="home-intro"><h1>ОГЭ по информатике</h1><p class="home-meta"><span>16 заданий</span><span>150 минут</span></p></div>
-      <div class="home-grid">
-        <button class="start-panel choice-card" data-action="open-exam">
-          <span class="section-icon">${icon('folder')}</span><span class="choice-title">Открыть экзамен</span>
-          <span class="choice-meta">.oge · .zip</span>${icon('arrow', 'choice-arrow')}
-        </button>
-        <button class="create-panel choice-card" data-action="editor">
-          <span class="section-icon">${icon('edit')}</span><span class="choice-title">Редактор экзамена</span>
-          <span class="choice-meta">Создать или изменить вариант</span>${icon('arrow', 'choice-arrow')}
-        </button>
+      <div class="home-actions">
+        <button class="primary" data-action="open-exam">${icon('folder')} Открыть экзамен ${icon('arrow')}</button>
+        <button class="text-button demo-button" data-action="demo">Демонстрационный вариант ${icon('arrow')}</button>
       </div>
-      <button class="text-button demo-button" data-action="demo">Демонстрационный вариант ${icon('arrow')}</button>
       ${s.exam ? `<div class="loaded-exam"><strong>${esc(s.exam.title)}</strong><button class="primary" data-action="registration">Продолжить ${icon('arrow')}</button></div>` : ''}
+      <div class="home-utilities">
+        <button class="text-button" data-action="editor">${icon('edit')} Редактор экзамена ${icon('arrow')}</button>
+        <button class="text-button" data-action="open-results" title="Открыть папку результатов">${icon('folder')} Результаты ${icon('arrow')}</button>
+      </div>
     </div>
-    <footer class="home-footer"><button class="text-button small" data-action="open-results" title="Открыть папку результатов">${icon('folder')} Результаты</button><span>${esc(s.version)}</span></footer>
+    <footer class="home-footer"><span>${esc(s.version)}</span></footer>
   </main>`;
 }
 export function registration(s) {
@@ -60,7 +58,6 @@ export function registration(s) {
     <div class="page-heading"><h1>Регистрация</h1><p>Таймер начнётся после активации.</p></div>
     <div class="registration-grid">
       <form id="registration-form" class="registration-form">
-        <h2>Данные участника</h2>
         <label>Номер бланка<input name="registration" inputmode="numeric" pattern="[0-9]{1,32}" maxlength="32" placeholder="00012345" autocomplete="off" required></label>
         <div class="field-row"><label>Фамилия<input name="surname" placeholder="Иванов" maxlength="80" autocomplete="off" required></label><label>Имя<input name="name" placeholder="Иван" maxlength="80" autocomplete="off" required></label></div>
         <div class="field-row passport-row"><label>Серия паспорта<input name="passportSeries" inputmode="numeric" pattern="[0-9]{4}" minlength="4" maxlength="4" placeholder="0000" autocomplete="off" required></label><label>Номер паспорта<input name="passportNumber" inputmode="numeric" pattern="[0-9]{6}" minlength="6" maxlength="6" placeholder="000000" autocomplete="off" required></label></div>
@@ -71,9 +68,9 @@ export function registration(s) {
         <p id="registration-error" class="form-error" role="alert"></p>
       </form>
       <aside class="registration-summary">
-        <h2>${esc(s.exam?.title || 'Экзамен')}</h2><div class="large-time">02:30:00</div><p>16 заданий · без паузы</p>
+        <h2>${esc(s.exam?.title || 'Экзамен')}</h2><div class="large-time">150 <span>минут</span></div><p>16 заданий</p>
         <hr><div class="summary-row"><strong>01–12</strong><span>Краткий ответ</span></div><div class="summary-row"><strong>13–16</strong><span>Ответ файлом</span></div>
-        <hr><p>Нажимайте <strong>«Сохранить ответ»</strong> после каждого задания.</p>
+        <hr><p class="summary-note">Без паузы. Таймер продолжит отсчёт после закрытия приложения.</p>
       </aside>
     </div>
   </main>`;
@@ -82,11 +79,11 @@ export function nav(s, current) {
   const a = s.session;
   return `<div class="nav-heading"><h2>Задания</h2><span id="saved-count">${a.savedCount} / 16</span></div>
     <nav class="task-grid" aria-label="Переход к заданию">${a.statuses.map(t => `<button class="task-number ${t.id === current ? 'current' : ''} ${t.saved ? 'saved' : ''} ${t.dirty ? 'dirty' : ''}" data-action="task" data-id="${t.id}" aria-current="${t.id === current ? 'step' : 'false'}" aria-label="Задание ${t.id}. ${t.saved ? 'Ответ сохранён' : 'Нет ответа'}${t.dirty ? '. Есть несохранённые изменения' : ''}">${pad(t.id)}${t.saved ? `<span class="mini-check">${icon('check')}</span>` : ''}${t.dirty ? '<span class="draft-dot"></span>' : ''}</button>`).join('')}</nav>
-    <div class="legend"><span><i class="legend-saved"></i>Сохранено</span><span><i class="legend-draft"></i>Черновик</span><span><i></i>Нет ответа</span></div>`;
+    <div class="legend"><span><i class="legend-saved"></i>Сохранено</span><span><i class="legend-draft"></i>Черновик</span></div>`;
 }
 export function imageStack(images, removable = false) {
   if (!images.length) return `<div class="empty-media">${icon('file')}<strong>Добавьте условие задания</strong><span>Изображение до 16 МБ</span></div>`;
-  return `<div class="image-stack">${images.map((a, i) => `<figure class="task-image"><figcaption><span>${esc(a.name)}</span><span>${i+1} / ${images.length}${removable ? `<button class="icon-button danger-text" data-action="remove-asset" data-id="${esc(a.id)}" title="Удалить изображение" aria-label="Удалить ${esc(a.name)}">${icon('close')}</button>` : ''}</span></figcaption><div class="image-holder"><img data-image-id="${esc(a.id)}" alt="Условие: ${esc(a.name)}"></div></figure>`).join('')}</div>`;
+  return `<div class="image-stack">${images.map((a, i) => `<figure class="task-image">${removable ? `<figcaption><span>${esc(a.name)}</span><span><button class="icon-button danger-text" data-action="remove-asset" data-id="${esc(a.id)}" title="Удалить изображение" aria-label="Удалить ${esc(a.name)}">${icon('close')}</button></span></figcaption>` : images.length > 1 ? `<figcaption><span>Страница ${i + 1} из ${images.length}</span></figcaption>` : ''}<div class="image-holder"><img data-image-id="${esc(a.id)}" alt="Условие задания, страница ${i + 1} из ${images.length}"></div></figure>`).join('')}</div>`;
 }
 export function resourceList(resources, editable = false) {
   if (!resources.length) return '<p class="muted small">Файлы не добавлены.</p>';
@@ -95,24 +92,24 @@ export function resourceList(resources, editable = false) {
 export function exam(s, task) {
   const a = s.session, file = task.draftFile || task.savedFile;
   const saved = task.savedAt ? `Сохранено в ${new Date(task.savedAt).toLocaleTimeString('ru-RU')}` : 'Не сохранено';
-  return header('Идёт экзамен', `<button class="text-button" data-action="fullscreen">${icon('screen')} Полный экран</button><button class="finish-button" data-action="finish">Завершить экзамен</button>`) + `<div id="connection-banner" class="connection-banner" hidden></div>
+  return header('Идёт экзамен', `<button class="icon-button" data-action="fullscreen" title="Полный экран" aria-label="Полный экран">${icon('screen')}</button><button class="finish-button" data-action="finish" aria-label="Завершить экзамен">Завершить</button>`) + `<div id="connection-banner" class="connection-banner" hidden></div>
     <main class="exam-layout">
       <aside class="exam-sidebar">
-        <div class="timer-box"><span>${icon('clock')} Осталось времени</span><strong id="timer">${time(a.remainingMs)}</strong><span class="timer-note">из 02:30:00</span></div>
+        <div class="timer-box"><span>Осталось</span><strong id="timer">${time(a.remainingMs)}</strong></div>
         <div id="task-nav">${nav(s, task.id)}</div>
         <div class="candidate-mini"><strong>${esc(a.candidate.surname)} ${esc(a.candidate.name)}</strong><span>Бланк ${esc(a.candidate.registration)}</span></div>
       </aside>
       <section class="exam-main">
-        <div class="task-heading"><div><span class="muted small">${esc(a.title)}</span><h1>Задание ${pad(task.id)}<span class="task-type">${task.kind === 'short' ? 'Краткий ответ' : 'Ответ файлом'}</span></h1></div>
-          <div class="zoom-controls" aria-label="Масштаб условия"><button data-action="zoom-out" title="Уменьшить" aria-label="Уменьшить условие">−</button><span id="zoom-label">По ширине</span><button data-action="zoom-in" title="Увеличить" aria-label="Увеличить условие">+</button></div>
+        <div class="task-heading"><h1>Задание ${pad(task.id)}</h1>
+          <div class="task-tools"><button class="icon-button paper-toggle" data-action="paper" title="Показать оригинальную яркость условия" aria-label="Оригинальная яркость условия" aria-pressed="false">${icon('contrast')}</button><div class="zoom-controls" aria-label="Масштаб условия"><button data-action="zoom-out" title="Уменьшить" aria-label="Уменьшить условие">−</button><span id="zoom-label">По ширине</span><button data-action="zoom-in" title="Увеличить" aria-label="Увеличить условие">+</button></div></div>
         </div>
         <div class="task-content" id="task-content">${task.hasResources ? `<section class="resources-panel"><h2>Файлы для работы</h2>${resourceList(task.resources)}</section>` : ''}${imageStack(task.images)}</div>
         <div class="answer-panel">
-          <div class="answer-label"><label for="answer-text">${task.kind === 'short' ? 'Ваш ответ' : 'Файл ответа'}</label><span id="answer-status" class="small ${task.dirty ? 'amber-text' : 'muted'}">${task.dirty ? 'Черновик' : saved}</span></div>
-          ${task.kind === 'short' ? `<div class="answer-row"><input id="answer-text" value="${esc(task.text)}" maxlength="4096" autocomplete="off" spellcheck="false" placeholder="Введите ответ"><button class="primary" data-action="save">${icon('check')} Сохранить ответ</button></div>` : `<div class="answer-row file-answer"><div class="chosen-file">${icon('file')}<div><strong>${file ? esc(file.name) : 'Файл не выбран'}</strong><span>${file ? fmtSize(file.size) : 'Выберите готовую работу'}</span></div></div><button class="secondary" data-action="attach">${icon('upload')} ${file ? 'Заменить файл' : 'Прикрепить файл'}</button><button class="primary" data-action="save">${icon('check')} Сохранить ответ</button></div><p class="small muted file-hint">После изменения файла прикрепите его заново.</p>`}
-          <div class="answer-meta"><span>Ctrl + Enter — сохранить</span>${task.savedAt || file ? '<button class="text-button small danger-text" data-action="clear-answer">Очистить ответ</button>' : ''}</div>
+          <div class="answer-label">${task.kind === 'short' ? '<label for="answer-text">Ответ</label>' : '<span>Файл ответа</span>'}<span id="answer-status" class="small ${task.dirty ? 'amber-text' : 'muted'}">${task.dirty ? 'Черновик' : saved}</span></div>
+          ${task.kind === 'short' ? `<div class="answer-row"><input id="answer-text" value="${esc(task.text)}" maxlength="4096" autocomplete="off" spellcheck="false" placeholder="Введите ответ"><button class="primary" data-action="save" aria-label="Сохранить ответ">${icon('check')} Сохранить</button></div>` : `<div class="answer-row file-answer"><div class="chosen-file">${icon('file')}<div><strong>${file ? esc(file.name) : 'Файл не выбран'}</strong>${file ? `<span>${fmtSize(file.size)}</span>` : ''}</div></div><button class="secondary" data-action="attach">${icon('upload')} ${file ? 'Заменить файл' : 'Прикрепить файл'}</button><button class="primary" data-action="save" aria-label="Сохранить ответ">${icon('check')} Сохранить</button></div><p class="small muted file-hint">После изменения файла прикрепите его заново.</p>`}
+          <div class="answer-meta"><span title="Сохранить ответ">Ctrl + Enter</span>${task.savedAt || file ? '<button class="text-button small danger-text" data-action="clear-answer">Очистить ответ</button>' : ''}</div>
         </div>
-        <footer class="task-footer"><button class="secondary" data-action="previous" ${task.id === 1 ? 'disabled' : ''}>${icon('back')} Предыдущее</button><span>${task.id} из 16</span><button class="secondary" data-action="next" ${task.id === 16 ? 'disabled' : ''}>Следующее ${icon('arrow')}</button></footer>
+        <footer class="task-footer"><button class="secondary" data-action="previous" aria-label="Предыдущее задание" ${task.id === 1 ? 'disabled' : ''}>${icon('back')} Назад</button><span>${task.id} из 16</span><button class="secondary" data-action="next" aria-label="Следующее задание" ${task.id === 16 ? 'disabled' : ''}>Далее ${icon('arrow')}</button></footer>
       </section>
     </main>`;
 }
@@ -120,30 +117,30 @@ export function editor(s, selected, currentCode = '') {
   const e = s.editor, t = e.tasks[selected - 1];
   const complete = e.tasks.filter(x => x.images.length && (!x.hasResources || x.resources.length)).length;
   return header('Редактор экзамена', `<button class="text-button" data-action="home">${icon('back')} На главную</button>`) + `<main class="editor-page">
-    <div class="editor-top"><h1>Редактор экзамена</h1><div class="button-row"><button class="secondary" data-action="export-project">Сохранить проект</button><button class="primary" data-action="export-exam">${icon('download')} Экспортировать экзамен</button></div></div>
+    <div class="editor-top"><h1>Редактор экзамена</h1><div class="button-row"><button class="secondary" data-action="export-project">Сохранить проект</button><button class="primary" data-action="export-exam">${icon('download')} Экспорт экзамена</button></div></div>
     <div class="editor-settings"><label>Название<input id="exam-title" maxlength="160" value="${esc(e.title)}"></label>
-      <div class="code-settings"><label>Код активации<input id="editor-code" value="${esc(currentCode)}" maxlength="128" placeholder="${e.hasActivation ? 'Код установлен' : 'Введите код'}" autocomplete="off"></label><button class="secondary compact" data-action="generate-code" title="Сгенерировать новый код" aria-label="Сгенерировать код">${icon('refresh')}</button><button class="secondary compact" data-action="set-code">Применить</button></div>
+      <div class="code-settings"><label>Код активации<input id="editor-code" value="${esc(currentCode)}" maxlength="128" placeholder="${e.hasActivation ? 'Код установлен' : 'Введите код'}" autocomplete="off"></label><button class="icon-button" data-action="generate-code" title="Сгенерировать новый код" aria-label="Сгенерировать код">${icon('refresh')}</button><button class="secondary compact" data-action="set-code">Применить</button></div>
     </div>
     <div class="editor-toolbar"><div class="button-row"><button class="secondary" data-action="import-images">${icon('folder')} Импорт из папки</button><button class="text-button" data-action="import-images-files">Выбрать изображения</button></div><div class="button-row"><button class="text-button" data-action="open-project">Открыть проект</button><button class="text-button danger-text" data-action="new-project">Новый проект</button></div></div>
-    <p class="import-note">Готово <strong>${complete} / 16</strong> заданий</p>
+    <p class="import-note"><strong>${complete} / 16</strong> заданий готово</p>
     <div class="editor-layout">
-      <nav class="editor-nav" aria-label="Задания редактора">${e.tasks.map(x => `<button data-action="editor-task" data-id="${x.id}" class="${x.id === selected ? 'selected' : ''}" aria-current="${x.id === selected ? 'step' : 'false'}" aria-label="Задание ${x.id}: ${x.images.length} изображений${x.hasResources ? `, ${x.resources.length} файлов` : ''}"><span class="editor-task-id">${pad(x.id)}</span><span><strong>Задание ${x.id}</strong><small>${x.images.length} изобр.${x.hasResources ? ` · ${x.resources.length} файл.` : ''}</small></span>${x.images.length && (!x.hasResources || x.resources.length) ? icon('check','ready-check') : '<span class="empty-dot"></span>'}</button>`).join('')}</nav>
+      <nav class="editor-nav" aria-label="Задания редактора">${e.tasks.map(x => `<button data-action="editor-task" data-id="${x.id}" class="${x.id === selected ? 'selected' : ''}" aria-current="${x.id === selected ? 'step' : 'false'}" aria-label="Задание ${x.id}: ${x.images.length} изображений${x.hasResources ? `, ${x.resources.length} файлов` : ''}"><span class="editor-task-id">${pad(x.id)}</span><span><strong>${x.kind === 'short' ? 'Краткий ответ' : 'Ответ файлом'}</strong><small>${x.images.length} изобр.${x.hasResources ? ` · ${x.resources.length} файл.` : ''}</small></span>${x.images.length && (!x.hasResources || x.resources.length) ? icon('check','ready-check') : '<span class="empty-dot"></span>'}</button>`).join('')}</nav>
       <section class="editor-canvas">
-        <div class="editor-task-heading"><div><h2>Задание ${pad(selected)}</h2><p>${t.kind === 'short' ? 'Краткий ответ' : 'Ответ файлом'}</p></div><button class="secondary" data-action="add-image">${icon('plus')} Добавить изображение</button></div>
+        <div class="editor-task-heading"><div><h2>Задание ${pad(selected)}</h2><p>${t.kind === 'short' ? 'Краткий ответ' : 'Ответ файлом'}</p></div><div class="button-row"><button class="icon-button paper-toggle" data-action="paper" title="Показать оригинальную яркость условия" aria-label="Оригинальная яркость условия" aria-pressed="false">${icon('contrast')}</button><button class="secondary" data-action="add-image">${icon('plus')} Добавить изображение</button></div></div>
         ${t.hasResources ? `<section class="resources-panel"><div class="split"><h3>Исходные файлы</h3><button class="text-button" data-action="add-resource">${icon('plus')} Добавить файлы</button></div>${resourceList(t.resources, true)}</section>` : ''}
         <div class="drop-area" id="drop-area">${imageStack(t.images, true)}</div>
-        <div class="canvas-footnote">Проект сохраняется автоматически.</div>
+        <div class="canvas-footnote">Автосохранение</div>
       </section>
     </div>
   </main>`;
 }
 export function result(s) {
   const a = s.session;
-  return header('Экзамен завершён') + `<main class="result-page"><div class="result-mark">${icon('check')}</div><h1>Экзамен завершён</h1><p class="result-subtitle">${a.finishReason === 'timeout' ? 'Время истекло.' : 'Ответы приняты.'}</p>
+  return header('Экзамен завершён') + `<main class="result-page"><div class="result-mark">${icon('check')}</div><h1>Экзамен завершён</h1>${a.finishReason === 'timeout' ? '<p class="result-subtitle">Время истекло.</p>' : ''}
     <section class="result-card"><div class="result-top"><div><span class="muted small">${esc(a.title)}</span><h2>${esc(a.candidate.surname)} ${esc(a.candidate.name)}</h2><p>Бланк ${esc(a.candidate.registration)}</p></div><div class="result-score"><strong>${a.savedCount}<span> / 16</span></strong><span>сохранено ответов</span></div></div>
       <div class="result-tasks">${a.statuses.map(t => `<span class="${t.saved ? 'saved' : ''}" title="Задание ${t.id}: ${t.saved ? 'сохранено' : 'нет ответа'}">${pad(t.id)}${t.saved ? icon('check') : ''}</span>`).join('')}</div>
       ${a.dirtyCount ? `<p class="draft-warning">Черновиков: ${a.dirtyCount}. Они сохранены отдельно от сданных ответов.</p>` : ''}<hr>
-      ${a.archiveReady ? `<h3>${icon('folder')} Результаты сохранены</h3><p class="path-text">${esc(a.resultDir)}</p><div class="button-row"><button class="primary" data-action="download-result">${icon('download')} Скачать ZIP</button><button class="secondary" data-action="open-folder">Открыть папку</button></div>` : `<h3>Ответы сохранены в локальном сеансе</h3><p class="form-error">${esc(a.exportError || 'Не удалось завершить экспорт. Проверьте свободное место.')}</p><button class="primary" data-action="retry-export">${icon('refresh')} Повторить экспорт</button>`}
+      ${a.archiveReady ? `<h3>${icon('folder')} Результаты сохранены</h3><div class="button-row"><button class="primary" data-action="download-result">${icon('download')} Скачать ZIP</button><button class="secondary" data-action="open-folder">Открыть папку</button></div><details class="result-location"><summary>Расположение файлов</summary><p class="path-text">${esc(a.resultDir)}</p></details>` : `<h3>Ответы сохранены в локальном сеансе</h3><p class="form-error">${esc(a.exportError || 'Не удалось завершить экспорт. Проверьте свободное место.')}</p><button class="primary" data-action="retry-export">${icon('refresh')} Повторить экспорт</button>`}
       <p class="privacy-note">${icon('lock')} ZIP содержит регистрационные данные. Передайте его организатору.</p>
     </section><button class="text-button" data-action="dismiss">На главную ${icon('arrow')}</button>
   </main>`;
