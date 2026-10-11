@@ -236,7 +236,7 @@ class ExamService {
     if (!exam) return null;
     return { id: exam.id, title: exam.title, published: exam.published, durationSeconds: M.DURATION,
       hasActivation: !!(exam.activation || exam.teacherHasActivation),
-      tasks: exam.tasks.map(t => ({ id: t.id, kind: M.taskKind(t.id), hasResources: M.hasResources(t.id),
+      tasks: exam.tasks.map(t => ({ id: t.id, kind: M.taskKind(t.id), hasResources: M.hasResources(t.id), requiresResources: M.requiresResources(t.id),
         images: [...t.images].sort(M.lexical).map(({ id, name, size }) => ({ id, name, size })),
         resources: t.resources.map(({ id, name, size }) => ({ id, name, size })),
         ...(includeCheckers ? { checker: G.validateChecker(t.id, t.checker) } : {}) })) };
@@ -263,6 +263,13 @@ class ExamService {
     const next=clone(this.editor); next.published=false;
     if (value) next.tasks[taskId-1].checker=value; else delete next.tasks[taskId-1].checker;
     await this.persistEditor(next); return this.publicExam(this.editor, true);
+  }
+  async previewReference({taskId} = {}) {
+    this.assertIdle(); this.assertTeacherUnlocked(); M.taskKind(taskId);
+    const task=clone(this.editor.tasks[taskId-1]), checker=G.validateChecker(taskId,task.checker);
+    check(checker?.type==='code' && checker.reference, 'Добавьте эталонную программу в настройки проверки.');
+    const result=await G.previewReference({task,checker,examDir:this.dir('editor'),runCode:options=>this.codeRunner.runCode(options)});
+    this.assertTeacherUnlocked(); return result;
   }
   async importReview(file) {
     this.assertIdle(); this.assertTeacherUnlocked(); return R.reviewView(await R.importResult(file, this.dir('reviews'), this.editor));
@@ -312,7 +319,7 @@ class ExamService {
       const parsed = M.parseImageName(name); if (!parsed) return { ignored: name };
       taskId = parsed.taskId; kind = 'image';
     }
-    M.taskKind(taskId); check(kind !== 'resource' || M.hasResources(taskId), 'Исходные файлы доступны только для заданий 11–14.');
+    M.taskKind(taskId); check(kind !== 'resource' || M.hasResources(taskId), 'Исходные файлы доступны только для заданий 11–16.');
     const next = clone(this.editor); next.published = false; const task = next.tasks[taskId - 1];
     const key = kind === 'image' ? 'images' : 'resources';
     check(task[key].length < 16 || task[key].some(a => a.name === name), 'В одном задании допустимо до 16 файлов каждого типа.');

@@ -63,15 +63,27 @@ function validateChecker(id, value) {
       comparison: comparison(value.comparison), caseSensitive: bool(value.caseSensitive, true) };
   } else if (value.type === 'code') {
     check(id >= 13, 'Проверка программы доступна только в заданиях 13–16.');
-    fields(value, ['type', 'language', 'tests', 'comparison']);
+    fields(value, ['type', 'language', 'tests', 'comparison', 'reference']);
     check(['python', 'javascript'].includes(value.language), 'Для автопроверки программы выберите Python или JavaScript.');
+    let reference;
+    if (value.reference !== undefined) {
+      object(value.reference, 'Некорректное эталонное решение.');
+      fields(value.reference, ['language', 'source']);
+      check(['python', 'javascript'].includes(value.reference.language), 'Для эталонного решения выберите Python или JavaScript.');
+      reference = { language: value.reference.language,
+        source: string(value.reference.source, LIMITS.sourceBytes, 'Эталонное решение') };
+      check(reference.source.trim().length > 0, 'Эталонное решение не может быть пустым.');
+    }
     check(Array.isArray(value.tests) && value.tests.length > 0 && value.tests.length <= LIMITS.tests,
       `Укажите от 1 до ${LIMITS.tests} тестов программы.`);
     result = { type: 'code', language: value.language, tests: value.tests.map(item => {
       object(item, 'Некорректный тест программы.'); fields(item, ['input', 'expected']);
-      return { input: string(item.input, LIMITS.testBytes, 'Входные данные'),
-        expected: string(item.expected, LIMITS.testBytes, 'Ожидаемый вывод') };
+      const test = { input: string(item.input, LIMITS.testBytes, 'Входные данные') };
+      if (Object.hasOwn(item, 'expected')) test.expected = string(item.expected, LIMITS.testBytes, 'Ожидаемый вывод');
+      else check(reference, 'Укажите ожидаемый вывод теста или добавьте эталонное решение.');
+      return test;
     }), comparison: comparison(value.comparison) };
+    if (reference) result.reference = reference;
   } else if (['spreadsheet', 'presentation'].includes(value.type)) {
     check(id >= 13, 'Проверка документа доступна только в заданиях 13–16.');
     result = validateOfficeChecker(value);
@@ -151,9 +163,59 @@ async function resourcesFor(task, examDir) {
   }
   return result;
 }
+async function resolveCodeTests(checker, runCode, resources) {
+  if (typeof runCode !== 'function') return { status: 'unavailable', message: 'Изолированный запуск программ недоступен.', tests: [] };
+  const tests = [];
+  // Resolve every reference output before executing a pupil program. Each call
+  // uses a fresh sandbox containing only that program and public condition files.
+  // Neither reference code nor outputs are ever arguments of the pupil runner.
+  for (let index = 0; index < checker.tests.length; index++) {
+    const test = checker.tests[index];
+    const detail = { index: index + 1, input: test.input };
+    if (Object.hasOwn(test, 'expected')) { tests.push({ ...detail, expected: test.expected, source: 'manual' }); continue; }
+    const prefix = `Эталонное решение, тест ${index + 1}: `;
+    const failed = message => ({ status: 'error', message: prefix + message, tests: [] });
+    let execution;
+    try { execution = await runCode({ language: checker.reference.language,
+      source: Buffer.from(checker.reference.source, 'utf8'), input: test.input, resources }); }
+    catch { return failed('не удалось выполнить изолированную проверку.'); }
+    if (!execution || !['ok', 'timeout', 'error', 'unavailable'].includes(execution.status)) {
+      return failed('средство запуска вернуло некорректный результат.');
+    }
+    if (execution.status === 'unavailable') return { status: 'unavailable',
+      message: prefix + safeMessage(execution.message, 'Изолированный запуск программ недоступен.'), tests: [] };
+    if (execution.status === 'timeout') return failed('превышено время выполнения.');
+    if (execution.status === 'error') return failed(execution.reason === 'runtime'
+      ? 'программа завершилась с ошибкой.' : execution.reason === 'output'
+        ? 'недопустимый вывод или превышен его допустимый объём.' : 'ошибка среды проверки программы.');
+    if ((execution.exitCode !== undefined && execution.exitCode !== null && execution.exitCode !== 0) || execution.signal) {
+      return failed('программа завершилась с ошибкой.');
+    }
+    if (typeof execution.stdout !== 'string' || Buffer.byteLength(execution.stdout, 'utf8') > LIMITS.outputBytes
+      || Buffer.from(execution.stdout, 'utf8').toString('utf8') !== execution.stdout) {
+      return failed('средство запуска вернуло недопустимый вывод.');
+    }
+    detail.expected = execution.stdout; detail.source = 'reference';
+    if (Number.isFinite(execution.durationMs) && execution.durationMs >= 0) detail.durationMs = execution.durationMs;
+    tests.push(detail);
+  }
+  return { status: 'ok', tests };
+}
+
+// An explicit teacher action can test the reference before there is a pupil
+// submission. The caller must protect this response as teacher-only data.
+async function previewReference({ task, checker = task?.checker, runCode, examDir } = {}) {
+  const validated = validateChecker(task?.id, checker);
+  check(validated?.type === 'code' && validated.reference, 'Добавьте эталонное решение для проверки.');
+  if (typeof runCode !== 'function') return { status: 'unavailable', message: 'Изолированный запуск программ недоступен.', tests: [] };
+  return resolveCodeTests(validated, runCode, await resourcesFor(task, examDir));
+}
+
 async function codeAssessment(task, checker, data, runCode, examDir) {
   if (typeof runCode !== 'function') return { status: 'unavailable', message: 'Изолированный запуск программ недоступен.' };
   const resources = await resourcesFor(task, examDir), tests = [];
+  const resolved = await resolveCodeTests(checker, runCode, resources);
+  if (resolved.status !== 'ok') return resolved;
   for (let index = 0; index < checker.tests.length; index++) {
     const test = checker.tests[index];
     let execution;
@@ -166,7 +228,7 @@ async function codeAssessment(task, checker, data, runCode, examDir) {
       message: safeMessage(execution.message, 'Изолированный запуск программ недоступен.'), tests };
     if (execution.status === 'error' && !['runtime', 'output'].includes(execution.reason)) return { status: 'error',
       message: safeMessage(execution.message, 'Ошибка среды проверки программы.'), tests };
-    const detail = { index: index + 1, status: 'incorrect' };
+    const detail = { index: index + 1, status: 'incorrect', input: test.input, expected: resolved.tests[index].expected };
     if (Number.isFinite(execution.durationMs) && execution.durationMs >= 0) detail.durationMs = execution.durationMs;
     if (execution.status === 'timeout') detail.message = 'Превышено время выполнения.';
     else if (execution.status === 'error') detail.message = safeMessage(execution.message, execution.reason === 'output'
@@ -178,7 +240,7 @@ async function codeAssessment(task, checker, data, runCode, examDir) {
         return { status: 'error', message: 'Средство запуска вернуло недопустимый вывод.', tests };
       }
       detail.actual = execution.stdout;
-      detail.status = normalize(execution.stdout, checker) === normalize(test.expected, checker) ? 'correct' : 'incorrect';
+      detail.status = normalize(execution.stdout, checker) === normalize(detail.expected, checker) ? 'correct' : 'incorrect';
       detail.message = detail.status === 'correct' ? 'Вывод совпадает.' : 'Вывод не совпадает.';
     }
     tests.push(detail);
@@ -228,4 +290,4 @@ async function assessExam({ exam, attempt, attemptDir, examDir, runCode } = {}) 
   return { version: 1, tasks, summary };
 }
 
-module.exports = { LIMITS, validateChecker, assessExam, normalize, labels };
+module.exports = { LIMITS, validateChecker, assessExam, previewReference, normalize, labels };

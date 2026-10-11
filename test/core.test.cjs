@@ -92,7 +92,7 @@ test('unavailable visible folder preserves legacy results and pending exports ca
 
 test('16 tasks, exact duration and fixed answer/resource matrix', () => {
   const e = M.blankExam(); assert.equal(e.tasks.length,16); assert.equal(e.durationSeconds,9000);
-  for (let id = 1; id <= 16; id++) { assert.equal(M.taskKind(id), id<=12?'short':'file'); assert.equal(M.hasResources(id), id>=11&&id<=14); }
+  for (let id = 1; id <= 16; id++) { assert.equal(M.taskKind(id), id<=12?'short':'file'); assert.equal(M.hasResources(id), id>=11&&id<=16); assert.equal(M.requiresResources(id), id>=11&&id<=14); }
   for (const id of [0,17,1.5,'2',null]) assert.throws(() => M.taskKind(id));
 });
 test('image parser accepts valid names and rejects out-of-range/malformed names', () => {

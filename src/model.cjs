@@ -7,7 +7,8 @@ const DURATION = 9000;
 const IMAGE_NAME = /^(\d{1,2})\.(\d+)\.(png|jpe?g|gif|webp|bmp)$/i;
 const lexical = (a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0;
 function taskKind(id) { check(Number.isInteger(id) && id >= 1 && id <= 16, 'Номер задания должен быть от 1 до 16.'); return id <= 12 ? 'short' : 'file'; }
-const hasResources = id => id >= 11 && id <= 14;
+const hasResources = id => id >= 11 && id <= 16;
+const requiresResources = id => id >= 11 && id <= 14;
 function blankExam() { return { format: 'oge-exam', version: 1, id: crypto.randomUUID(), title: 'ОГЭ по информатике · Вариант 1', durationSeconds: DURATION, published: false, activation: null, tasks: Array.from({ length: 16 }, (_, i) => ({ id: i + 1, images: [], resources: [] })) }; }
 function parseImageName(name) { const m = name.match(IMAGE_NAME); return m && +m[1] >= 1 && +m[1] <= 16 ? { taskId: +m[1], image: m[2], ext: m[3].toLowerCase() } : null; }
 async function activation(code) {
@@ -51,10 +52,10 @@ function validateShape(exam, requirePublished = false) {
     const task = exam.tasks[i]; check(task && task.id === i + 1, 'Задания должны идти от 1 до 16.');
     validateChecker(task.id, task.checker);
     check(Array.isArray(task.images) && task.images.length <= 16 && Array.isArray(task.resources) && task.resources.length <= 16, 'Слишком много файлов в задании (максимум 16 каждого типа).');
-    check(hasResources(task.id) || task.resources.length === 0, 'Исходные файлы допустимы только в заданиях 11–14.');
+    check(hasResources(task.id) || task.resources.length === 0, 'Исходные файлы допустимы только в заданиях 11–16.');
     if (exam.published || requirePublished) {
       check(task.images.length > 0, `В задании ${task.id} нет изображения условия.`);
-      check(!hasResources(task.id) || task.resources.length > 0, `В задании ${task.id} нет исходных файлов для работы.`);
+      check(!requiresResources(task.id) || task.resources.length > 0, `В задании ${task.id} нет исходных файлов для работы.`);
     }
     const names = new Set();
     for (const [type, assets] of [['image', task.images], ['resource', task.resources]]) {
@@ -98,4 +99,4 @@ function dirty(attempt, id) {
   if (taskKind(id) === 'short') return attempt.drafts[id] !== undefined && attempt.drafts[id] !== (attempt.answers[id]?.text ?? '');
   return !!attempt.draftFiles[id] && attempt.draftFiles[id].id !== attempt.answers[id]?.file?.id;
 }
-module.exports = { DURATION, taskKind, hasResources, blankExam, parseImageName, lexical, activation, verifyCode, candidate, validateShape, validateFiles, answered, dirty };
+module.exports = { DURATION, taskKind, hasResources, requiresResources, blankExam, parseImageName, lexical, activation, verifyCode, candidate, validateShape, validateFiles, answered, dirty };
