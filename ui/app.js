@@ -3,8 +3,9 @@ const app = document.querySelector('#app');
 const modal = document.querySelector('#modal');
 let token = location.hash.slice(1) || sessionStorage.getItem('oge-key');
 if (token) { sessionStorage.setItem('oge-key', token); history.replaceState(null, '', location.pathname); }
-const state = { data: null, mode: 'home', task: null, editorTask: 1, editorCode: '', busy: false, zoom: 0, paperOriginal: false, stopped: false };
+const state = { data: null, mode: 'home', task: null, editorTask: 1, editorCode: '', busy: false, zoom: 0, paperOriginal: false, stopped: false, review: null, assessment: null, allowUnmatched: false };
 const imageUrls = new Map();
+const checkerDrafts = new Map();
 let toastTimer, draftTimer, metaTimer, pendingDraft = null, pendingTitle = null, draftChain = Promise.resolve(), polling = false, imageGeneration = 0;
 
 function applyTheme(theme) {
@@ -50,7 +51,7 @@ async function download(route, name) {
 }
 function setBusy(value) {
   state.busy = value; document.body.dataset.busy = String(value); app.setAttribute('aria-busy', String(value));
-  app.querySelectorAll('button,input').forEach(el => {
+  app.querySelectorAll('button,input,textarea,select').forEach(el => {
     if (value) { el.dataset.disabledBeforeBusy = String(el.disabled); el.disabled = true; }
     else if (el.dataset.disabledBeforeBusy !== undefined) { el.disabled = el.dataset.disabledBeforeBusy === 'true'; delete el.dataset.disabledBeforeBusy; }
   });
@@ -115,7 +116,8 @@ function render(keepScroll = false) {
   const s = state.data;
   applyTheme(s.theme);
   if (state.mode === 'exam' && state.task) app.innerHTML = V.exam(s, state.task);
-  else if (state.mode === 'editor') app.innerHTML = V.editor(s, state.editorTask, state.editorCode);
+  else if (state.mode === 'editor') app.innerHTML = V.editor(pendingTitle !== null ? { ...s, editor: { ...s.editor, title: pendingTitle } } : s, state.editorTask, state.editorCode, getCheckerDraft());
+  else if (state.mode === 'review' && state.review) app.innerHTML = V.review(s, state.review, state.assessment, state.allowUnmatched);
   else if (state.mode === 'registration') app.innerHTML = V.registration(s);
   else if (state.mode === 'result') app.innerHTML = V.result(s);
   else app.innerHTML = V.home(s);
@@ -168,6 +170,34 @@ async function flushMeta(applyCode = false) {
   state.data.editor = result.editor; pendingTitle = null;
   if (result.code) state.editorCode = result.code;
 }
+function getCheckerDraft(taskId = state.editorTask) {
+  if (!checkerDrafts.has(taskId)) {
+    const task = state.data.editor.tasks.find(t => t.id === taskId), c = task?.checker;
+    checkerDrafts.set(taskId, { mode: c?.type || 'manual', answersText: c?.answers?.join('\n') || '', expected: c?.expected || '', caseSensitive: c?.caseSensitive !== false, ignoreWhitespace: !!c?.ignoreWhitespace, comparison: c?.comparison || 'trim', language: c?.language || 'python', tests: c?.tests?.map(t => ({ ...t })) || [{ input: '', expected: '' }], dirty: false, open: !!c });
+  }
+  return checkerDrafts.get(taskId);
+}
+function checkerValue(draft) {
+  if (draft.mode === 'manual') return null;
+  if (draft.mode === 'short') return { type: 'short', answers: draft.answersText.split(/\r?\n/).filter(answer => answer.trim().length), caseSensitive: draft.caseSensitive, ignoreWhitespace: draft.ignoreWhitespace };
+  if (draft.mode === 'text') return { type: 'text', expected: draft.expected, comparison: draft.comparison, caseSensitive: draft.caseSensitive };
+  return { type: 'code', language: draft.language, tests: draft.tests.map(test => ({ input: test.input, expected: test.expected })), comparison: draft.comparison };
+}
+function markCheckerDirty() {
+  const draft = getCheckerDraft(); draft.dirty = true; draft.open = true;
+  const label = document.querySelector('#checker-summary');
+  if (label) { label.textContent = 'Не применено'; label.classList.add('amber-text'); }
+  const apply = document.querySelector('[data-action="checker-apply"]');
+  if (apply) { apply.disabled = state.busy; if (state.busy) apply.dataset.disabledBeforeBusy = 'false'; }
+}
+async function flushChecker() {
+  for (const [taskId, draft] of checkerDrafts) {
+    if (!draft.dirty) continue;
+    const editor = await request('/api/editor/checker', { taskId, checker: checkerValue(draft) });
+    state.data.editor = editor.editor || editor; draft.dirty = false;
+  }
+}
+async function flushEditor(applyCode = false) { await flushMeta(applyCode); await flushChecker(); }
 async function refresh() {
   const next = await request('/api/state'); state.data = next;
   if (next.session?.status === 'finished' && state.mode === 'exam') {
@@ -188,7 +218,7 @@ async function save() {
 }
 async function importImageFiles(files, auto = true) {
   if (!files.length) return;
-  await flushMeta();
+  await flushEditor();
   const names = new Set();
   for (const f of files) { if (names.has(f.name.toLowerCase())) throw new Error(`В выбранных папках повторяется имя «${f.name}». Переименуйте файлы перед импортом.`); names.add(f.name.toLowerCase()); }
   let count = 0, ignored = 0; const errors = [];
@@ -224,8 +254,9 @@ const actions = {
       home: ['Справка', 'Откройте файл .oge или .zip от организатора. Для тренировки доступен демонстрационный вариант с кодом DEMO-2026.\n\nВ редакторе можно создать собственный вариант.'],
       registration: ['Перед началом', 'Таймер начнётся после ввода данных и правильного кода активации. Для демонстрационного варианта: DEMO-2026.\n\nДля тренировки используйте вымышленные данные. Регистрация хранится на этом компьютере и не проверяется по государственным базам.'],
       exam: ['Работа с заданиями', 'В заданиях 1–12 введите краткий ответ. В заданиях 13–16 прикрепите файл. После каждого задания нажимайте «Сохранить» или Ctrl+Enter. Черновики не считаются сданными ответами.\n\nФайлы для работы доступны в заданиях 11–14. После изменения файла прикрепите его заново.\n\nТаймер не останавливается при закрытии окна или перезапуске.'],
-      editor: ['Подготовка варианта', 'Имена изображений: 1.1.png, 1.2.png, 2.1.png и так далее. Импорт из папки распределяет их по номеру задания. Порядок лексикографический: 1.10.png раньше 1.2.png. Для числового порядка используйте 1.01.png, 1.02.png.\n\nВ задания 11–14 добавьте исходные файлы. Установите код активации перед экспортом.\n\n«Сохранить проект» допускает незавершённый вариант. «Экспорт экзамена» проверяет все 16 заданий.'],
-      result: ['Результаты', 'Папка и ZIP содержат сохранённые ответы, отдельно черновики и регистрационные данные. Архив не зашифрован: передавайте его только организатору.\n\nЧисло сохранённых ответов не является оценкой. Автоматическая проверка правильности не выполняется.']
+      editor: ['Подготовка варианта', 'Имена изображений: 1.1.png, 1.2.png, 2.1.png и так далее. Импорт из папки распределяет их по номеру задания. Порядок лексикографический: 1.10.png раньше 1.2.png. Для числового порядка используйте 1.01.png, 1.02.png.\n\nВ задания 11–14 добавьте исходные файлы. Установите код активации перед экспортом.\n\nАвтопроверка необязательна. Для краткого ответа добавьте допустимые ответы; для файла выберите текст или программу с тестами. Нажмите «Применить». При переходе к другому заданию, экспорте или проверке изменения также сохраняются.\n\n«Сохранить проект» сохраняет эталоны. «Экспорт экзамена» проверяет все 16 заданий и удаляет эталоны из файла для учеников.'],
+      review: ['Проверка работы', 'Откройте ZIP с результатами ученика из редактора проекта с эталонами. Проверяются только сданные ответы. Черновики не участвуют в проверке.\n\nПрограммы запускаются в изолированной среде с ограничениями. Недоступность среды или ошибка запуска отображаются отдельно. Задания без эталона проверяются учителем вручную.\n\nОтчёт можно скачать вместе с исходной работой. Итоговая оценка выставляется учителем.'],
+      result: ['Результаты', 'Папка и ZIP содержат сохранённые ответы, отдельно черновики и регистрационные данные. Архив не зашифрован: передавайте его только организатору.\n\nЧисло сохранённых ответов не является оценкой. Учитель может проверить работу в редакторе своего проекта.']
     };
     const [title, message] = sections[state.mode] || sections.home;
     await new Promise(resolve => {
@@ -235,7 +266,7 @@ const actions = {
       modal.showModal();
     });
   },
-  home: async () => { if (state.mode === 'editor') await flushMeta(); state.mode = 'home'; await refresh(); render(); },
+  home: async () => { if (state.mode === 'editor') await flushEditor(); state.mode = 'home'; await refresh(); render(); },
   editor: async () => { await refresh(); state.mode = 'editor'; render(); },
   registration: async () => { state.mode = 'registration'; render(); },
   'open-exam': async () => {
@@ -268,14 +299,17 @@ const actions = {
   'zoom-in': async () => { state.zoom = state.zoom === 3 ? 0 : Math.min(2, state.zoom + 1); applyZoom(); },
   'zoom-out': async () => { state.zoom = state.zoom === 0 ? 3 : state.zoom === 3 ? 3 : state.zoom - 1; applyZoom(); },
   'download-asset': async el => { await download(`/api/asset?id=${encodeURIComponent(el.dataset.id)}&download=1`, el.dataset.name); toast('Файл передан в загрузки браузера.'); },
-  'editor-task': async el => { await flushMeta(); state.editorTask = Number(el.dataset.id); render(); },
-  'generate-code': async () => { await flushMeta(); const v = await request('/api/editor/update', { generateCode: true }); state.data.editor = v.editor; state.editorCode = v.code; render(); toast('Новый код установлен. Сохраните его отдельно и сообщите ученикам.'); },
-  'set-code': async () => { await flushMeta(true); render(); toast('Название и код сохранены.'); },
+  'editor-task': async el => { await flushEditor(); state.editorTask = Number(el.dataset.id); render(); },
+  'checker-apply': async () => { await flushEditor(); render(); toast('Настройки проверки сохранены.'); },
+  'checker-add-test': async () => { const draft = getCheckerDraft(); if (draft.tests.length >= 16) return; draft.tests.push({ input: '', expected: '' }); markCheckerDirty(); render(); },
+  'checker-remove-test': async el => { const draft = getCheckerDraft(); if (draft.tests.length < 2) return; draft.tests.splice(Number(el.dataset.id), 1); markCheckerDirty(); render(); },
+  'generate-code': async () => { await flushEditor(); const v = await request('/api/editor/update', { generateCode: true }); state.data.editor = v.editor; state.editorCode = v.code; render(); toast('Новый код установлен. Сохраните его отдельно и сообщите ученикам.'); },
+  'set-code': async () => { await flushEditor(true); render(); toast('Название и код сохранены.'); },
   'import-images': async () => importImageFiles(await pickFiles({ directory: true }), true),
   'import-images-files': async () => importImageFiles(await pickFiles({ multiple: true, accept: imageAccept }), true),
   'add-image': async () => importImageFiles(await pickFiles({ multiple: true, accept: imageAccept }), false),
   'add-resource': async () => {
-    const files = await pickFiles({ multiple: true }); if (!files.length) return; await flushMeta();
+    const files = await pickFiles({ multiple: true }); if (!files.length) return; await flushEditor();
     for (const f of files) {
       const v = await request(`/api/upload?kind=resource&task=${state.editorTask}&name=${encodeURIComponent(f.name)}`, undefined, f); state.data.editor = v.editor;
     }
@@ -283,20 +317,36 @@ const actions = {
   },
   'remove-asset': async el => {
     if (!await ask('Удалить файл из задания?', 'Файл будет удалён из проекта. Оригинал на компьютере останется без изменений.', 'Удалить', true)) return;
-    await flushMeta(); state.data.editor = await request('/api/editor/remove', { id: el.dataset.id }); render(); toast('Файл удалён из задания.');
+    await flushEditor(); state.data.editor = await request('/api/editor/remove', { id: el.dataset.id }); render(); toast('Файл удалён из задания.');
   },
   'export-project': async () => exportEditor(false), 'export-exam': async () => exportEditor(true),
   'open-project': async () => {
     const [file] = await pickFiles({ accept: '.oge,.zip' }); if (!file) return;
     if (!await ask('Открыть другой проект?', 'Текущий локальный проект будет заменён. Ранее скачанные проекты и экзамены сохранятся.', 'Открыть')) return;
+    await flushEditor();
     toast('Проверяем проект…', false, true);
     state.data.editor = await request(`/api/upload?kind=package&edit=1&name=${encodeURIComponent(file.name)}`, undefined, file);
-    state.editorTask = 1; state.editorCode = ''; pendingTitle = null; render(); toast('Проект открыт. Можно сохранить прежний код или установить новый.');
+    state.editorTask = 1; state.editorCode = ''; pendingTitle = null; checkerDrafts.clear(); render(); toast('Проект открыт. Можно сохранить прежний код или установить новый.');
   },
   'new-project': async () => {
     if (!await ask('Начать новый проект?', 'Сначала скачайте текущий проект, если он нужен. Локальный рабочий проект будет заменён.', 'Создать')) return;
-    state.data.editor = await request('/api/editor/new', {}); state.editorTask = 1; state.editorCode = ''; pendingTitle = null; render(); toast('Создан новый проект.');
+    await flushEditor(); state.data.editor = await request('/api/editor/new', {}); state.editorTask = 1; state.editorCode = ''; pendingTitle = null; checkerDrafts.clear(); render(); toast('Создан новый проект.');
   },
+  'open-review': async () => {
+    if (state.mode === 'editor') await flushEditor();
+    const [file] = await pickFiles({ accept: '.zip' }); if (!file) return;
+    toast('Открываем работу…', false, true);
+    const work = await request(`/api/upload?kind=review&name=${encodeURIComponent(file.name)}`, undefined, file);
+    state.review = work; state.assessment = null; state.allowUnmatched = false; state.mode = 'review'; render(); toast('Работа открыта.');
+  },
+  'back-editor': async () => { await refresh(); state.mode = 'editor'; render(); },
+  'check-review': async () => {
+    if (state.review.contextMatch !== true && !state.allowUnmatched) throw new Error('Подтвердите использование текущих эталонов.');
+    toast('Проверяем ответы…', false, true);
+    state.assessment = await request('/api/review/check', { id: state.review.id, allowUnmatched: state.allowUnmatched });
+    render(); toast('Проверка завершена.');
+  },
+  'download-review': async () => { await download(`/api/review/report?id=${encodeURIComponent(state.review.id)}`, `OGE_${state.review.registration}_reviewed-results.zip`); toast('Отчёт передан в загрузки браузера.'); },
   'download-result': async () => { await download('/api/result', `OGE_${state.data.session.candidate.registration}_results.zip`); toast('Архив передан в загрузки браузера. Основная копия остаётся в папке результатов.'); },
   'open-folder': async () => { await request('/api/open-folder', {}); },
   'open-results': async () => { await request('/api/open-folder', { root: true }); },
@@ -305,16 +355,16 @@ const actions = {
   quit: async () => {
     const active = state.data.session?.status === 'active';
     if (!await ask('Закрыть приложение?', active ? 'Экзамен не будет сдан досрочно. Время не ставится на паузу: после повторного запуска сеанс восстановится, а просроченный экзамен завершится автоматически. Для сдачи сейчас нажмите «Завершить».' : 'Все уже сохранённые проекты и результаты останутся на этом компьютере.', 'Закрыть приложение')) return;
-    if (active) await flushDraft(); if (state.mode === 'editor') await flushMeta();
+    if (active) await flushDraft(); if (state.mode === 'editor') await flushEditor();
     await request('/api/quit', { confirm: true }); state.stopped = true;
     app.innerHTML = `<main class="loading"><h1>Приложение закрыто</h1><p>Эту вкладку можно закрыть. Для продолжения запустите симулятор через ярлык или start.sh.</p></main>`;
   }
 };
 async function exportEditor(publish) {
-  await flushMeta(true); toast(publish ? 'Проверяем задания и собираем экзамен…' : 'Собираем проект…', false, true);
+  await flushEditor(true); toast(publish ? 'Проверяем задания и собираем экзамен…' : 'Собираем проект…', false, true);
   const v = await request('/api/editor/export', { publish });
   await download(`/api/package?id=${encodeURIComponent(v.id)}`, publish ? 'exam.oge' : 'project.oge');
-  render(); toast(publish ? 'Экзамен экспортирован. Передайте ученикам файл exam.oge, код — отдельно.' : 'Проект сохранён. Незавершённый проект нельзя запустить как экзамен.');
+  render(); toast(publish ? 'Экзамен экспортирован. Передайте ученикам файл exam.oge, код — отдельно.' : 'Проект сохранён вместе с эталонами. Для учеников используйте «Экспорт экзамена».');
 }
 app.addEventListener('click', e => {
   const el = e.target.closest('[data-action]'); if (!el || el.disabled) return;
@@ -327,7 +377,7 @@ app.addEventListener('submit', e => {
     try {
       const code = b.code; delete b.code;
       state.data.session = await request('/api/start', { candidate: b, code });
-      state.editorCode = ''; state.task = await request('/api/task?id=1'); state.mode = 'exam'; render(); toast('Экзамен начался.');
+      state.editorCode = ''; checkerDrafts.clear(); state.review = null; state.assessment = null; state.data.editor = null; state.task = await request('/api/task?id=1'); state.mode = 'exam'; render(); toast('Экзамен начался.');
     } catch (e) { const error = document.querySelector('#registration-error'); if (error) error.textContent = e.message; else throw e; }
   });
 });
@@ -338,7 +388,24 @@ app.addEventListener('input', e => {
   } else if (e.target.id === 'exam-title') {
     pendingTitle = e.target.value; clearTimeout(metaTimer); metaTimer = setTimeout(() => flushMeta().catch(e => toast(e.message, true)), 700);
   } else if (e.target.id === 'editor-code') state.editorCode = e.target.value;
+  else if (state.mode === 'editor' && e.target.dataset.checkerField && !['enabled', 'mode'].includes(e.target.dataset.checkerField)) {
+    const draft = getCheckerDraft(), field = e.target.dataset.checkerField;
+    if (e.target.dataset.checkerTest !== undefined) draft.tests[Number(e.target.dataset.checkerTest)][field] = e.target.value;
+    else draft[field] = e.target.type === 'checkbox' ? e.target.checked : e.target.value;
+    markCheckerDirty();
+  }
 });
+app.addEventListener('change', e => {
+  if (state.mode === 'editor' && ['enabled', 'mode'].includes(e.target.dataset.checkerField)) {
+    const draft = getCheckerDraft(); draft.mode = e.target.dataset.checkerField === 'enabled' ? e.target.checked ? 'short' : 'manual' : e.target.value;
+    markCheckerDirty(); render();
+  } else if (state.mode === 'editor' && e.target.dataset.checkerField === 'language') render();
+  else if (e.target.id === 'review-allow-unmatched') {
+    state.allowUnmatched = e.target.checked;
+    const button = document.querySelector('[data-action="check-review"]'); if (button) button.disabled = !state.allowUnmatched;
+  }
+});
+app.addEventListener('toggle', e => { if (e.target.id === 'checker-panel' && state.mode === 'editor') getCheckerDraft().open = e.target.open; }, true);
 app.addEventListener('dragover', e => { if (state.mode === 'editor' && e.target.closest('#drop-area')) { e.preventDefault(); document.querySelector('#drop-area').classList.add('drag-over'); } });
 app.addEventListener('dragleave', e => { if (e.target.closest('#drop-area')) document.querySelector('#drop-area')?.classList.remove('drag-over'); });
 app.addEventListener('drop', e => {
@@ -346,7 +413,7 @@ app.addEventListener('drop', e => {
   e.preventDefault(); document.querySelector('#drop-area').classList.remove('drag-over'); const files = [...e.dataTransfer.files]; run(() => importImageFiles(files, false));
 });
 document.addEventListener('keydown', e => { if ((e.ctrlKey || e.metaKey) && e.key === 'Enter' && state.mode === 'exam' && !modal.open) { e.preventDefault(); run(save); } });
-window.addEventListener('beforeunload', e => { if (!state.stopped && (state.data?.session?.status === 'active' || pendingTitle !== null)) { e.preventDefault(); e.returnValue = ''; } });
+window.addEventListener('beforeunload', e => { if (!state.stopped && (state.data?.session?.status === 'active' || pendingTitle !== null || [...checkerDrafts.values()].some(draft => draft.dirty))) { e.preventDefault(); e.returnValue = ''; } });
 async function boot() {
   if (!token) {
     app.innerHTML = `<main class="loading"><h1>Откройте приложение через ярлык</h1><p>Страница без локального ключа не имеет доступа к экзаменам. Запустите start.sh или откройте приватный файл OPEN-IN-BROWSER.html в папке данных приложения.</p></main>`; return;
