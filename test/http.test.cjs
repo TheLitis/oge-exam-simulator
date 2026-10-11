@@ -3,7 +3,7 @@ const { test }=require('node:test');
 const assert=require('node:assert/strict');
 const os=require('node:os');
 const {pathToFileURL,fileURLToPath}=require('node:url');
-const {fsp,path,JSZip}=require('../src/io.cjs');
+const {fsp,path,JSZip,UserError}=require('../src/io.cjs');
 const {startServer,openBrowser}=require('../src/server.cjs');
 const PERSON={registration:'00012345',surname:'Тестовый',name:'Ученик',passportSeries:'0000',passportNumber:'000000'};
 const TEACHER_PASSWORD='HTTP teacher test password';
@@ -491,4 +491,47 @@ test('server finishes on its own without browser polling',async t=>{
   const end=Date.now()+5000;
   while(!app.service.attempt.archivePath&&Date.now()<end)await new Promise(r=>setTimeout(r,100));
   assert.equal(app.service.attempt.status,'finished');assert.equal(app.service.attempt.finishReason,'timeout');assert.ok(app.service.attempt.archivePath);
+});
+
+test('only teachers open all results; pupils retain access to their own finished folder',async t=>{
+  const opened=[]; let fail=false;
+  const {app,post}=await server(t,{folderLauncher:async folder=>{
+    if(fail)throw new UserError('Synthetic file-manager failure.',503);opened.push(folder);
+  }});
+  assert.equal((await post('/api/open-folder',{root:true})).status,403);
+  assert.equal((await post('/api/open-folder',{})).status,403);assert.equal(opened.length,0);
+  const capability=await teacher(post);
+  assert.equal((await post('/api/open-folder',{root:true,path:'/arbitrary/untrusted/path'},capability)).status,200);
+  assert.deepEqual(opened,[app.service.resultsRoot]);
+  fail=true;assert.equal((await post('/api/open-folder',{root:true},capability)).status,503);fail=false;
+  assert.equal((await post('/api/demo')).status,200);
+  assert.equal((await post('/api/start',{candidate:PERSON,code:'DEMO-2026'})).status,200);
+  assert.equal((await post('/api/open-folder',{})).status,403);
+  assert.equal((await post('/api/finish',{confirm:true})).status,200);
+  assert.equal((await post('/api/open-folder',{root:true})).status,403);
+  assert.equal((await post('/api/open-folder',{path:'/arbitrary/untrusted/path'})).status,200);
+  assert.equal(opened.at(-1),app.service.attempt.resultDir);
+});
+
+test('reference preview requires teacher access and withholds output if access expires during execution',async t=>{
+  let offset=0,release,started;let waiting=false;
+  const executed=new Promise(resolve=>{started=resolve;});
+  const pendingExecution=new Promise(resolve=>{release=resolve;});
+  const codeRunner={capabilities:async()=>({available:true,languages:{python:true,javascript:true}}),
+    runCode:async()=>{if(waiting){started();await pendingExecution;}return {status:'ok',stdout:'42\n',durationMs:1};}};
+  const {app,headers,post}=await server(t,{clock:{now:()=>Date.now()+offset,monotonic:()=>performance.now()+offset,codeRunner}});
+  assert.equal((await post('/api/editor/reference-preview',{taskId:13})).status,403);
+  const capability=await teacher(post);
+  assert.equal((await post('/api/demo',{edit:true},capability)).status,200);
+  assert.equal((await post('/api/editor/checker',{taskId:13,checker:{type:'code',language:'javascript',
+    reference:{language:'python',source:'# SYNTHETIC-HIDDEN-REFERENCE\nprint(42)'},tests:[{input:'20\n22\n'}]}},capability)).status,200);
+  const preview=await post('/api/editor/reference-preview',{taskId:13},capability);
+  assert.equal(preview.status,200);assert.equal(preview.body.value.tests[0].expected,'42\n');
+  assert.equal(JSON.stringify(preview.body.value).includes('SYNTHETIC-HIDDEN-REFERENCE'),false);
+  assert.equal(JSON.stringify(await state(app,headers)).includes('SYNTHETIC-HIDDEN-REFERENCE'),false);
+  waiting=true;const pending=post('/api/editor/reference-preview',{taskId:13},capability);
+  await executed;offset=15*60*1000+1;release();
+  const expired=await pending;assert.equal(expired.status,403);
+  assert.equal(JSON.stringify(expired.body).includes('42'),false);
+  assert.equal((await post('/api/editor/reference-preview',{taskId:13})).status,403);
 });

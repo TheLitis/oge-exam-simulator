@@ -267,7 +267,18 @@ async function flushMeta(applyCode = false) {
 function getCheckerDraft(taskId = state.editorTask) {
   if (!checkerDrafts.has(taskId)) {
     const task = state.data.editor.tasks.find(t => t.id === taskId), c = task?.checker;
-    checkerDrafts.set(taskId, { mode: c?.type || 'manual', answersText: c?.answers?.join('\n') || '', expected: c?.expected || '', caseSensitive: c?.caseSensitive !== false, ignoreWhitespace: !!c?.ignoreWhitespace, comparison: c?.comparison || 'trim', language: c?.language || 'python', tests: c?.tests?.map(t => ({ ...t })) || [{ input: '', expected: '' }], spreadsheetCriteria: c?.type === 'spreadsheet' ? c.criteria.map(item => ({ ...item })) : [V.officeCriterionDefaults('spreadsheet')], presentationCriteria: c?.type === 'presentation' ? c.criteria.map(item => ({ ...item })) : [V.officeCriterionDefaults('presentation')], dirty: false, open: !!c });
+    checkerDrafts.set(taskId, {
+      mode: c?.type || 'manual', answersText: c?.answers?.join('\n') || '', expected: c?.expected || '',
+      caseSensitive: c?.caseSensitive !== false, ignoreWhitespace: !!c?.ignoreWhitespace,
+      comparison: c?.comparison || 'trim', language: c?.language || 'python',
+      referenceEnabled: !!c?.reference, referenceLanguage: c?.reference?.language || c?.language || 'python',
+      referenceSource: c?.reference?.source || '', referencePreview: null,
+      tests: c?.tests?.map(t => ({ input: t.input, expected: t.expected ?? '', manualExpected: Object.hasOwn(t, 'expected') }))
+        || [{ input: '', expected: '', manualExpected: false }],
+      spreadsheetCriteria: c?.type === 'spreadsheet' ? c.criteria.map(item => ({ ...item })) : [V.officeCriterionDefaults('spreadsheet')],
+      presentationCriteria: c?.type === 'presentation' ? c.criteria.map(item => ({ ...item })) : [V.officeCriterionDefaults('presentation')],
+      dirty: false, open: !!c
+    });
   }
   return checkerDrafts.get(taskId);
 }
@@ -276,7 +287,11 @@ function checkerValue(draft) {
   if (draft.mode === 'short') return { type: 'short', answers: draft.answersText.split(/\r?\n/).filter(answer => answer.trim().length), caseSensitive: draft.caseSensitive, ignoreWhitespace: draft.ignoreWhitespace };
   if (draft.mode === 'text') return { type: 'text', expected: draft.expected, comparison: draft.comparison, caseSensitive: draft.caseSensitive };
   if (['spreadsheet', 'presentation'].includes(draft.mode)) return { type: draft.mode, criteria: draft[`${draft.mode}Criteria`].map(officeCriterionValue) };
-  return { type: 'code', language: draft.language, tests: draft.tests.map(test => ({ input: test.input, expected: test.expected })), comparison: draft.comparison };
+  return { type: 'code', language: draft.language,
+    tests: draft.tests.map(test => ({ input: test.input,
+      ...(!draft.referenceEnabled || test.manualExpected ? { expected: test.expected } : {}) })),
+    comparison: draft.comparison,
+    ...(draft.referenceEnabled ? { reference: { language: draft.referenceLanguage, source: draft.referenceSource } } : {}) };
 }
 function officeNumber(value) { return typeof value === 'string' && !value.trim() ? null : Number(value); }
 function officeCriterionValue(item) {
@@ -290,12 +305,23 @@ function officeCriterionValue(item) {
   if (kind === 'imageCount') return { kind, slide: officeNumber(item.slide), minimum: officeNumber(item.minimum) };
   return { kind };
 }
+function invalidateReferencePreview(taskId = state.editorTask) {
+  const draft = checkerDrafts.get(taskId); if (draft) draft.referencePreview = null;
+  if (taskId === state.editorTask) app.querySelectorAll('[data-reference-preview]').forEach(el => el.remove());
+}
 function markCheckerDirty() {
-  const draft = getCheckerDraft(); draft.dirty = true; draft.open = true;
+  const draft = getCheckerDraft(); draft.dirty = true; draft.open = true; invalidateReferencePreview();
   const label = document.querySelector('#checker-summary');
   if (label) { label.textContent = 'Не применено'; label.classList.add('amber-text'); }
   const apply = document.querySelector('[data-action="checker-apply"]');
   if (apply) { apply.disabled = state.busy; if (state.busy) apply.dataset.disabledBeforeBusy = 'false'; }
+  const preview = document.querySelector('[data-action="reference-preview"]');
+  if (preview) {
+    const enabled = state.data.checking?.available && state.data.checking.languages?.[draft.referenceLanguage]
+      && draft.referenceSource.trim() && draft.tests.some(test => !test.manualExpected);
+    preview.disabled = state.busy || !enabled;
+    if (state.busy) preview.dataset.disabledBeforeBusy = String(!enabled);
+  }
 }
 async function flushChecker() {
   for (const [taskId, draft] of checkerDrafts) {
@@ -364,8 +390,8 @@ const actions = {
     const sections = {
       home: ['Справка', 'Откройте файл .oge или .zip от организатора. Для тренировки доступен демонстрационный вариант с кодом DEMO-2026.\n\nВ редакторе можно создать собственный вариант.'],
       registration: ['Перед началом', 'Таймер начнётся после ввода данных и правильного кода активации. Для демонстрационного варианта: DEMO-2026.\n\nДля тренировки используйте вымышленные данные. Регистрация хранится на этом компьютере и не проверяется по государственным базам.'],
-      exam: ['Работа с заданиями', 'В заданиях 1–12 введите краткий ответ. В заданиях 13–16 прикрепите файл. После каждого задания нажимайте «Сохранить» или Ctrl+Enter. Черновики не считаются сданными ответами.\n\nФайлы для работы доступны в заданиях 11–14. После изменения файла прикрепите его заново.\n\nТаймер не останавливается при закрытии окна или перезапуске.'],
-      editor: ['Подготовка варианта', 'Имена изображений: 1.1.png, 1.2.png, 2.1.png и так далее. Импорт из папки распределяет их по номеру задания. Порядок лексикографический: 1.10.png раньше 1.2.png. Для числового порядка используйте 1.01.png, 1.02.png.\n\nВ задания 11–14 добавьте исходные файлы. Установите код активации перед экспортом.\n\nАвтопроверка необязательна. Для краткого ответа добавьте допустимые ответы; для файла выберите текст, программу с тестами, таблицу или презентацию с критериями. Таблицы проверяются по сохранённым значениям и формулам; пересчёт формул не выполняется. Нажмите «Применить». При переходе к другому заданию, экспорте или проверке изменения также сохраняются.\n\n«Сохранить проект» сохраняет эталоны. «Экспорт экзамена» проверяет все 16 заданий и удаляет эталоны из файла для учеников.'],
+      exam: ['Работа с заданиями', 'В заданиях 1–12 введите краткий ответ. В заданиях 13–16 прикрепите файл. После каждого задания нажимайте «Сохранить» или Ctrl+Enter. Черновики не считаются сданными ответами.\n\nФайлы для работы доступны в заданиях 11–16. После изменения файла прикрепите его заново.\n\nТаймер не останавливается при закрытии окна или перезапуске.'],
+      editor: ['Подготовка варианта', 'Имена изображений: 1.1.png, 1.2.png, 2.1.png и так далее. Импорт из папки распределяет их по номеру задания. Порядок лексикографический: 1.10.png раньше 1.2.png. Для числового порядка используйте 1.01.png, 1.02.png.\n\nВ заданиях 11–14 исходные файлы обязательны; в 15–16 их можно добавить при необходимости. Установите код активации перед экспортом.\n\nАвтопроверка необязательна. Для краткого ответа добавьте допустимые ответы; для файла выберите текст, программу с тестами и необязательным эталонным кодом, таблицу или презентацию с критериями. Таблицы проверяются по сохранённым значениям и формулам; пересчёт формул не выполняется. Нажмите «Применить». При переходе к другому заданию, экспорте или проверке изменения также сохраняются.\n\n«Сохранить проект» сохраняет эталоны. «Экспорт экзамена» проверяет все 16 заданий и удаляет эталоны из файла для учеников.'],
       review: ['Проверка работы', 'Откройте ZIP с результатами ученика из редактора проекта с эталонами. Проверяются только сданные ответы. Черновики не участвуют в проверке.\n\nПрограммы запускаются в изолированной среде с ограничениями. Недоступность среды или ошибка запуска отображаются отдельно. Задания без эталона проверяются учителем вручную.\n\nОтчёт можно скачать вместе с исходной работой. Итоговая оценка выставляется учителем.'],
       result: ['Результаты', 'Папка и ZIP содержат сохранённые ответы, отдельно черновики и регистрационные данные. Архив не зашифрован: передавайте его только организатору.\n\nЧисло сохранённых ответов не является оценкой. Учитель может проверить работу в редакторе своего проекта.']
     };
@@ -414,8 +440,29 @@ const actions = {
   'download-asset': async el => { await download(`/api/asset?id=${encodeURIComponent(el.dataset.id)}&download=1`, el.dataset.name); toast('Файл передан в загрузки браузера.'); },
   'editor-task': async el => { await flushEditor(); state.editorTask = Number(el.dataset.id); render(); },
   'checker-apply': async () => { await flushEditor(); render(); toast('Настройки проверки сохранены.'); },
-  'checker-add-test': async () => { const draft = getCheckerDraft(); if (draft.tests.length >= 16) return; draft.tests.push({ input: '', expected: '' }); markCheckerDirty(); render(); },
+  'checker-add-test': async () => { const draft = getCheckerDraft(); if (draft.tests.length >= 16) return; draft.tests.push({ input: '', expected: '', manualExpected: false }); markCheckerDirty(); render(); },
   'checker-remove-test': async el => { const draft = getCheckerDraft(); if (draft.tests.length < 2) return; draft.tests.splice(Number(el.dataset.id), 1); markCheckerDirty(); render(); },
+  'reference-all-tests': async () => { const draft = getCheckerDraft(); draft.tests.forEach(test => { test.manualExpected = false; }); markCheckerDirty(); render(); },
+  'reference-file': async () => {
+    const generation = teacherGeneration, draft = getCheckerDraft();
+    const [file] = await pickFiles({ accept: '.py,.js,.cjs' }); if (!file) return;
+    assertTeacherGeneration(generation);
+    if (!/\.(py|js|cjs)$/i.test(file.name)) throw new Error('Выберите эталонный файл .py, .js или .cjs.');
+    if (file.size > 65536) throw new Error('Эталонная программа должна занимать не более 64 КиБ.');
+    let source;
+    try { source = new TextDecoder('utf-8', { fatal: true }).decode(await file.arrayBuffer()); }
+    catch { throw new Error('Сохраните эталонную программу в UTF-8.'); }
+    assertTeacherGeneration(generation);
+    draft.referenceSource = source; draft.referenceLanguage = /\.py$/i.test(file.name) ? 'python' : 'javascript';
+    markCheckerDirty(); render(); toast('Эталонная программа добавлена.');
+  },
+  'reference-preview': async () => {
+    const generation = teacherGeneration;
+    await flushEditor(); assertTeacherGeneration(generation); const draft = getCheckerDraft();
+    draft.referencePreview = currentResponse(await request('/api/editor/reference-preview', { taskId: state.editorTask }));
+    render(); toast(draft.referencePreview.status === 'ok' ? 'Эталон проверен.' : draft.referencePreview.message,
+      draft.referencePreview.status !== 'ok');
+  },
   'checker-add-criterion': async () => { const draft = getCheckerDraft(), criteria = draft[`${draft.mode}Criteria`]; if (!criteria || criteria.length >= 32) return; criteria.push(V.officeCriterionDefaults(draft.mode)); markCheckerDirty(); render(); },
   'checker-remove-criterion': async el => { const draft = getCheckerDraft(), criteria = draft[`${draft.mode}Criteria`]; if (!criteria) return; criteria.splice(Number(el.dataset.id), 1); markCheckerDirty(); render(); },
   'generate-code': async () => { await flushEditor(); const v = currentResponse(await request('/api/editor/update', { generateCode: true })); state.data.editor = v.editor; state.editorCode = v.code; render(); toast('Новый код установлен. Сохраните его отдельно и сообщите ученикам.'); },
@@ -427,12 +474,13 @@ const actions = {
     const files = await pickFiles({ multiple: true }); if (!files.length) return; await flushEditor();
     for (const f of files) {
       const v = currentResponse(await request(`/api/upload?kind=resource&task=${state.editorTask}&name=${encodeURIComponent(f.name)}`, undefined, f)); state.data.editor = v.editor;
+      invalidateReferencePreview();
     }
     render(); toast('Исходные файлы добавлены.');
   },
   'remove-asset': async el => {
     if (!await ask('Удалить файл из задания?', 'Файл будет удалён из проекта. Оригинал на компьютере останется без изменений.', 'Удалить', true)) return;
-    await flushEditor(); state.data.editor = currentResponse(await request('/api/editor/remove', { id: el.dataset.id })); render(); toast('Файл удалён из задания.');
+    await flushEditor(); state.data.editor = currentResponse(await request('/api/editor/remove', { id: el.dataset.id })); invalidateReferencePreview(); render(); toast('Файл удалён из задания.');
   },
   'export-project': async () => exportEditor(false), 'export-exam': async () => exportEditor(true),
   'open-project': async () => {
@@ -465,7 +513,12 @@ const actions = {
   'download-review': async () => { await download(`/api/review/report?id=${encodeURIComponent(state.review.id)}`, `OGE_${state.review.registration}_reviewed-results.zip`); toast('Отчёт передан в загрузки браузера.'); },
   'download-result': async () => { await download('/api/result', `OGE_${state.data.session.candidate.registration}_results.zip`); toast('Архив передан в загрузки браузера. Основная копия остаётся в папке результатов.'); },
   'open-folder': async () => { await request('/api/open-folder', {}); },
-  'open-results': async () => { await request('/api/open-folder', { root: true }); },
+  'open-results': async () => {
+    if (!await ensureTeacher()) return;
+    try { await request('/api/open-folder', { root: true }); }
+    catch (error) { error.message += ` Папка: ${state.data.resultsRoot}`; throw error; }
+    finally { await lockTeacher(); }
+  },
   'retry-export': async () => { toast('Повторяем экспорт…', false, true); state.data.session = await request('/api/export/retry', {}); render(); toast(state.data.session.archiveReady ? 'Архив сформирован.' : 'Экспорт пока не завершён.', !state.data.session.archiveReady); },
   dismiss: async () => { state.data = await request('/api/dismiss', {}); state.mode = 'home'; render(); },
   quit: async () => {
@@ -509,7 +562,7 @@ app.addEventListener('input', e => {
     criterion[e.target.dataset.checkerField] = e.target.type === 'checkbox' ? e.target.checked : e.target.value; markCheckerDirty();
   } else if (state.mode === 'editor' && e.target.dataset.checkerCriterion === undefined && e.target.dataset.checkerField && !['enabled', 'mode'].includes(e.target.dataset.checkerField)) {
     const draft = getCheckerDraft(), field = e.target.dataset.checkerField;
-    if (e.target.dataset.checkerTest !== undefined) draft.tests[Number(e.target.dataset.checkerTest)][field] = e.target.value;
+    if (e.target.dataset.checkerTest !== undefined) draft.tests[Number(e.target.dataset.checkerTest)][field] = e.target.type === 'checkbox' ? e.target.checked : e.target.value;
     else draft[field] = e.target.type === 'checkbox' ? e.target.checked : e.target.value;
     markCheckerDirty();
   }
@@ -526,7 +579,7 @@ app.addEventListener('change', e => {
   } else if (state.mode === 'editor' && e.target.dataset.checkerCriterion === undefined && ['enabled', 'mode'].includes(e.target.dataset.checkerField)) {
     const draft = getCheckerDraft(); draft.mode = e.target.dataset.checkerField === 'enabled' ? e.target.checked ? 'short' : 'manual' : e.target.value;
     markCheckerDirty(); render();
-  } else if (state.mode === 'editor' && e.target.dataset.checkerField === 'language') render();
+  } else if (state.mode === 'editor' && ['language', 'referenceLanguage', 'referenceEnabled', 'manualExpected'].includes(e.target.dataset.checkerField)) render();
   else if (e.target.id === 'review-allow-unmatched') {
     state.allowUnmatched = e.target.checked;
     const button = document.querySelector('[data-action="check-review"]'); if (button) button.disabled = !state.allowUnmatched;
@@ -539,7 +592,12 @@ app.addEventListener('drop', e => {
   if (state.mode !== 'editor' || !e.target.closest('#drop-area')) return;
   e.preventDefault(); document.querySelector('#drop-area').classList.remove('drag-over'); const files = [...e.dataTransfer.files]; run(() => importImageFiles(files, false));
 });
-document.addEventListener('keydown', e => { if ((e.ctrlKey || e.metaKey) && e.key === 'Enter' && state.mode === 'exam' && !modal.open) { e.preventDefault(); run(save); } });
+document.addEventListener('keydown', e => {
+  if (e.key === 'Tab' && !e.shiftKey && e.target.dataset?.checkerField === 'referenceSource') {
+    e.preventDefault(); e.target.setRangeText('    ', e.target.selectionStart, e.target.selectionEnd, 'end');
+    e.target.dispatchEvent(new Event('input', { bubbles: true }));
+  } else if ((e.ctrlKey || e.metaKey) && e.key === 'Enter' && state.mode === 'exam' && !modal.open) { e.preventDefault(); run(save); }
+});
 window.addEventListener('beforeunload', e => { if (!state.stopped && (state.data?.session?.status === 'active' || pendingTitle !== null || [...checkerDrafts.values()].some(draft => draft.dirty))) { e.preventDefault(); e.returnValue = ''; } });
 async function boot() {
   if (!token) {

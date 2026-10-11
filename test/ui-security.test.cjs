@@ -62,3 +62,18 @@ test('late teacher report cannot initiate a download after the teacher view was 
   await assert.rejects(pending, { code: 'TEACHER_SESSION_CHANGED' });
   assert.equal(objectUrls, 0);
 });
+
+test('late reference preview cannot restore expected outputs after teacher lock', async () => {
+  let deliver, started;
+  const body = new Promise(resolve => { deliver = resolve; });
+  const fetching = new Promise(resolve => { started = resolve; });
+  const context = await page(async () => { started(); return { ok: true, json: () => body }; });
+  vm.runInContext("state.mode = 'editor'; state.editorTask = 16; checkerDrafts.set(16, { referencePreview: null }); flushEditor = async () => {};", context);
+  const pending = vm.runInContext("actions['reference-preview']()", context);
+  await fetching;
+  vm.runInContext('clearTeacherView()', context);
+  deliver({ ok: true, value: { status: 'ok', tests: [{ index: 1, expected: 'synthetic-private-output' }] } });
+  await assert.rejects(pending, { code: 'TEACHER_SESSION_CHANGED' });
+  assert.equal(vm.runInContext('checkerDrafts.size', context), 0);
+  assert.equal(vm.runInContext('state.data.editor', context), null);
+});

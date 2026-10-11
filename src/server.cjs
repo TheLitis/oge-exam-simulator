@@ -8,6 +8,7 @@ const { pathToFileURL } = require('node:url');
 const { fs, fsp, path, crypto, UserError, check, LIMITS, mkdir, atomic, json, readJson, boundedCopy, safeName } = require('./io.cjs');
 const { ExamService } = require('./service.cjs');
 const { PROJECT_LIMIT } = require('./teacher.cjs');
+const { openFolder } = require('./desktop.cjs');
 
 const CSP = "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' blob:; connect-src 'self'; font-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; object-src 'none'";
 async function executable(name) {
@@ -48,11 +49,6 @@ async function writeBrowserBootstrap(root, info) {
   await atomic(file, page);
   await atomic(path.join(root, 'OPEN-IN-BROWSER.html'), page);
   return file;
-}
-async function openFolder(folder) {
-  if (process.platform === 'linux') { const bin = await executable('xdg-open'); check(bin, 'Не найден xdg-open. Путь к результатам показан на экране.'); await launch(bin, [folder]); }
-  else if (process.platform === 'darwin') await launch('/usr/bin/open', [folder]);
-  else await launch('explorer.exe', [folder]);
 }
 async function defaultResultsDirectory() {
   let documents = path.join(os.homedir(), 'Documents');
@@ -115,7 +111,7 @@ async function instanceResponds(info) {
   });
 }
 
-async function startServer({ root, resultsRoot, open = true, port = 0, lock = true, clock, browserLauncher = openBrowser } = {}) {
+async function startServer({ root, resultsRoot, open = true, port = 0, lock = true, clock, browserLauncher = openBrowser, folderLauncher = openFolder } = {}) {
   process.umask(0o077);
   const isolatedData = !!root;
   root ||= path.join(process.env.XDG_DATA_HOME || path.join(os.homedir(), '.local/share'), 'oge-exam-simulator');
@@ -259,6 +255,7 @@ async function startServer({ root, resultsRoot, open = true, port = 0, lock = tr
         case '/api/editor/new': result = await asTeacher(() => service.newEditor()); break;
         case '/api/editor/update': result = await asTeacher(() => service.updateEditor(b)); break;
         case '/api/editor/checker': result = await asTeacher(() => service.setEditorChecker(b)); break;
+        case '/api/editor/reference-preview': result = await asTeacher(async () => { const preview=await service.previewReference(b); requireTeacher(); return preview; }); break;
         case '/api/review/check': result = await asTeacher(() => service.checkReview(b)); break;
         case '/api/editor/remove': result = await asTeacher(() => service.removeEditorAsset(b.id)); break;
         case '/api/editor/export': result = await asTeacher(() => service.exportExam(b.publish)); break;
@@ -271,7 +268,11 @@ async function startServer({ root, resultsRoot, open = true, port = 0, lock = tr
         case '/api/finish': check(b.confirm === true, 'Необходимо подтвердить завершение.'); result = await serial(() => service.finish('manual')); break;
         case '/api/export/retry': result = await serial(() => service.exportResults()); break;
         case '/api/dismiss': result = await serial(() => service.dismissResult()); break;
-        case '/api/open-folder': await openFolder(b.root === true ? service.resultsRoot : service.attempt?.resultDir || service.resultsRoot); result = true; break;
+        case '/api/open-folder': result = await serial(async () => {
+          const ownResult=b.root!==true && service.attempt?.status==='finished' && service.attempt.resultDir;
+          if (!ownResult) requireTeacher();
+          await folderLauncher(ownResult || service.resultsRoot); return true;
+        }); break;
         case '/api/quit': check(b.confirm === true, 'Необходимо подтверждение.'); result = true; res.once('finish', () => setTimeout(() => close().catch(() => {}), 100)); break;
         default: throw new UserError('Не найдено.', 404);
       }

@@ -327,6 +327,13 @@ label { display: flex; flex-direction: column; gap: 8px; min-width: 0; color: va
 .checker-options-body .check-option { font-size: 12px; }
 .checker-runtime-note, .review-warning { background: var(--amber-soft); color: var(--amber); font-size: 12px; padding: 10px 12px; border-radius: 7px; overflow-wrap: anywhere; }
 .checker-tests { display: flex; flex-direction: column; gap: 20px; }
+.checker-reference { display: flex; flex-direction: column; gap: 14px; border: 1px solid var(--line); border-radius: 8px; padding: 14px; background: var(--surface-subtle); }
+.checker-reference .reference-file-button { align-self: end; justify-self: end; margin-bottom: 1px; }
+.reference-source { min-height: 190px; font: 13px/1.6 ui-monospace, 'DejaVu Sans Mono', monospace; tab-size: 4; }
+.checker-test-note + .checker-test-note { margin-top: -12px; }
+.manual-expected-option { margin-bottom: 12px; font-size: 12px; }
+.checker-generated-output { display: flex; flex-direction: column; gap: 9px; min-width: 0; font-size: 12px; color: var(--muted); }
+.checker-generated-output pre { margin: 0; min-height: 120px; padding: 10px 13px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface-subtle); color: var(--ink); font: 12px/1.6 ui-monospace, 'DejaVu Sans Mono', monospace; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 250px; overflow: auto; }
 .checker-test { border-top: 1px solid var(--line); padding-top: 12px; }
 .checker-test > .split { margin-bottom: 9px; }
 .checker-test h3 { font-size: 12px; font-weight: 500; }
