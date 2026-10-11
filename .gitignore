@@ -4,6 +4,10 @@ dist/
 *.log
 *.tmp
 *.oge
+*.ogeresult
+*.ogekeys
+reviews/
+teacher/
 results/
 sessions/
 .env
