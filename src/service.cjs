@@ -4,23 +4,28 @@ const { fs, fsp, path, crypto, LIMITS, UserError, check, mkdir, json, readJson, 
 const M = require('./model.cjs');
 const { migrateLegacyResults } = require('./results.cjs');
 const { version } = require('../package.json');
+const G = require('./grading.cjs');
+const CodeRunner = require('./code-runner.cjs');
+const R = require('./review.cjs');
 const clone = value => structuredClone(value);
 const iso = ms => new Date(ms).toISOString();
 const html = value => String(value ?? '').replace(/[&<>"']/g, c => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[c]));
 const csv = value => '"' + String(value ?? '').replace(/^[=+@\-\t\r]/, x => "'" + x).replace(/"/g, '""') + '"';
 
 class ExamService {
-  constructor(root, { now = Date.now, monotonic = () => performance.now(), resultsRoot } = {}) {
+  constructor(root, { now = Date.now, monotonic = () => performance.now(), resultsRoot, codeRunner = CodeRunner } = {}) {
     this.root = path.resolve(root); this.now = now; this.monotonic = monotonic;
     this.resultsRoot = path.resolve(resultsRoot || this.dir('results'));
     this.config = {}; this.editor = null; this.exam = null; this.attempt = null;
     this.lastCheckpoint = 0; this.nextActivationAt = 0; this.badCodes = 0;
     this.lastError = null; this.recovered = false;
+    this.codeRunner = codeRunner; this.checking = null;
   }
   dir(...parts) { return path.join(this.root, ...parts); }
   attemptDir() { return this.dir('sessions', this.attempt.id); }
   async init() {
-    for (const p of ['', 'editor/assets', 'exams', 'sessions', 'exports', 'incoming']) await mkdir(this.dir(p));
+    for (const p of ['', 'editor/assets', 'exams', 'sessions', 'exports', 'incoming', 'reviews']) await mkdir(this.dir(p));
+    this.checking = await this.codeRunner.capabilities();
     try { await mkdir(this.resultsRoot); }
     catch { this.lastError = 'Не удалось открыть папку результатов. Сеансы сохранены; проверьте доступ к папке Документы.'; }
     // Incoming uploads are never submitted answers and are safe to discard after a restart.
@@ -72,7 +77,8 @@ class ExamService {
     await json(this.dir('sessions', next.id, 'session.json'), next, true); this.attempt = next;
   }
   async persistEditor(next) {
-    M.validateShape(next); await json(this.dir('editor/manifest.json'), next, true); this.editor = next;
+    M.validateShape(next); check(Buffer.byteLength(JSON.stringify(next)) <= LIMITS.json, 'Проект с эталонами превышает 1 МБ. Сократите тесты.');
+    await json(this.dir('editor/manifest.json'), next, true); this.editor = next;
   }
   async persistConfig(patch) { const next = { ...this.config, ...patch }; await json(this.dir('config.json'), next, true); this.config = next; }
   async migrateResults() {
@@ -106,13 +112,14 @@ class ExamService {
     check(this.attempt?.status === 'active', 'Экзамен не начат или уже завершён.');
     if (this.remaining() <= 0) { await this.finish('timeout'); throw new UserError('Время экзамена истекло. Новые ответы не принимаются.', 409); }
   }
-  publicExam(exam) {
+  publicExam(exam, includeCheckers = false) {
     if (!exam) return null;
     return { id: exam.id, title: exam.title, published: exam.published, durationSeconds: M.DURATION,
       hasActivation: !!exam.activation,
       tasks: exam.tasks.map(t => ({ id: t.id, kind: M.taskKind(t.id), hasResources: M.hasResources(t.id),
         images: [...t.images].sort(M.lexical).map(({ id, name, size }) => ({ id, name, size })),
-        resources: t.resources.map(({ id, name, size }) => ({ id, name, size })) })) };
+        resources: t.resources.map(({ id, name, size }) => ({ id, name, size })),
+        ...(includeCheckers ? { checker: G.validateChecker(t.id, t.checker) } : {}) })) };
   }
   sessionView() {
     const a = this.attempt; if (!a) return null;
@@ -123,15 +130,42 @@ class ExamService {
       statuses, savedCount: statuses.filter(s => s.saved).length, dirtyCount: statuses.filter(s => s.dirty).length,
       resultDir: a.resultDir || null, archiveReady: !!a.archivePath, exportError: a.exportError || null, recovered: this.recovered };
   }
-  state() { return { version, theme: this.theme(), exam: this.publicExam(this.exam), editor: this.attempt?.status === 'active' ? null : this.publicExam(this.editor), session: this.sessionView(), resultsRoot: this.resultsRoot, warning: this.lastError }; }
-  async newEditor() { this.assertIdle(); await this.persistEditor(M.blankExam()); return this.publicExam(this.editor); }
+  state() { return { version, theme: this.theme(), exam: this.publicExam(this.exam), editor: this.attempt?.status === 'active' ? null : this.publicExam(this.editor, true), session: this.sessionView(), checking:this.checking, resultsRoot: this.resultsRoot, warning: this.lastError }; }
+  async newEditor() { this.assertIdle(); await this.persistEditor(M.blankExam()); return this.publicExam(this.editor, true); }
+  async setEditorChecker({taskId, checker} = {}) {
+    this.assertIdle(); M.taskKind(taskId); const value=G.validateChecker(taskId, checker);
+    const next=clone(this.editor); next.published=false;
+    if (value) next.tasks[taskId-1].checker=value; else delete next.tasks[taskId-1].checker;
+    await this.persistEditor(next); return this.publicExam(this.editor, true);
+  }
+  async importReview(file) {
+    this.assertIdle(); return R.reviewView(await R.importResult(file, this.dir('reviews'), this.editor));
+  }
+  async loadReview(id) {
+    this.assertIdle(); check(typeof id==='string' && /^[a-f0-9-]{36}$/.test(id), 'Некорректный идентификатор работы.');
+    const record=await readJson(this.dir('reviews',id,'review.json')); check(record.id===id && record.attempt?.answers, 'Работа повреждена. Откройте ZIP повторно.');
+    record.contextMatch=record.context?R.contextMatches(record.context,this.editor):null; return record;
+  }
+  async checkReview({id, allowUnmatched=false} = {}) {
+    check(typeof allowUnmatched==='boolean', 'Некорректное подтверждение варианта.');
+    const record=await this.loadReview(id);
+    check(record.contextMatch===true || allowUnmatched, 'Сопоставьте вариант с проектом и подтвердите использование эталонов.');
+    const assessment=await G.assessExam({exam:clone(this.editor),attempt:record.attempt,attemptDir:this.dir('reviews',id),examDir:this.dir('editor'),runCode:options=>this.codeRunner.runCode(options)});
+    assessment.projectSha256=crypto.createHash('sha256').update(JSON.stringify(this.editor)).digest('hex');
+    await R.writeReviewReport(record,assessment,this.dir('reviews',id));
+    await json(this.dir('reviews',id,'review.json'),record); return assessment;
+  }
+  async reviewReport(id) {
+    await this.loadReview(id); const file=this.dir('reviews',id,'reviewed-results.zip');
+    check(fs.existsSync(file), 'Сначала проверьте работу.'); return file;
+  }
   async updateEditor({ title, code, generateCode = false } = {}) {
     this.assertIdle(); const next = clone(this.editor); next.published = false;
     if (title !== undefined) { check(typeof title === 'string', 'Некорректное название.'); next.title = title.trim(); }
     let newCode = null;
     if (generateCode) code = crypto.randomBytes(6).toString('hex').toUpperCase().match(/.{4}/g).join('-');
     if (code !== undefined && code !== '') { next.activation = await M.activation(code); newCode = code.trim(); }
-    await this.persistEditor(next); return { editor: this.publicExam(this.editor), code: newCode };
+    await this.persistEditor(next); return { editor: this.publicExam(this.editor, true), code: newCode };
   }
   async addEditorAsset(file, name, taskId, kind, auto = false) {
     this.assertIdle(); safeName(name); check(['image', 'resource'].includes(kind), 'Некорректный тип вложения.');
@@ -158,16 +192,17 @@ class ExamService {
       task[key].push({ id, name, path: relative, mime, ...meta }); task[key].sort(M.lexical);
       await this.persistEditor(next);
     } catch (e) { await fsp.rm(dest, { force: true }); throw e; }
-    return { taskId, editor: this.publicExam(this.editor) };
+    return { taskId, editor: this.publicExam(this.editor, true) };
   }
   async removeEditorAsset(id) {
     this.assertIdle(); const next = clone(this.editor); next.published = false;
     for (const t of next.tasks) { t.images = t.images.filter(a => a.id !== id); t.resources = t.resources.filter(a => a.id !== id); }
-    await this.persistEditor(next); return this.publicExam(this.editor);
+    await this.persistEditor(next); return this.publicExam(this.editor, true);
   }
   async exportExam(publish = true) {
     this.assertIdle(); check(typeof publish === 'boolean', 'Некорректное состояние публикации.');
     const next = clone(this.editor); next.id = crypto.randomUUID(); next.published = publish;
+    if (publish) for (const task of next.tasks) delete task.checker;
     await M.validateFiles(next, this.dir('editor'), publish);
     const out = this.dir('exports', `${next.id}.oge`);
     const files = [{ name: 'manifest.json', data: JSON.stringify(next, null, 2) }];
@@ -182,7 +217,7 @@ class ExamService {
       const exam = await extractPackage(file, dir); await M.validateFiles(exam, dir, !edit);
       if (edit) {
         for (const t of exam.tasks) for (const a of [...t.images, ...t.resources]) await fsp.copyFile(path.join(dir, a.path), this.dir('editor', a.path));
-        exam.published = false; await this.persistEditor(exam); return this.publicExam(this.editor);
+        exam.published = false; await this.persistEditor(exam); return this.publicExam(this.editor, true);
       }
       await this.persistConfig({ examId: id }); this.exam = exam; this.examDir = dir; return this.publicExam(exam);
     } catch (e) { await fsp.rm(dir, { recursive: true, force: true }); throw e; }
@@ -306,6 +341,7 @@ class ExamService {
       const meta = { format: 'oge-results', version: 1, sessionId: a.id, examId: a.examId, examTitle: a.title, startedAt: iso(a.startedAt), deadlineAt: iso(a.deadlineAt), finishedAt: iso(a.finishedAt), elapsedSeconds: Math.round(a.elapsedMs / 1000), finishReason: a.finishReason, savedCount: answers.filter(x => x.saved).length };
       await json(path.join(temp, 'candidate.json'), a.candidate);
       await json(path.join(temp, 'answers.json'), { ...meta, answers });
+      await json(path.join(temp, 'grading-context.json'), R.gradingContext(this.sessionExam));
       await json(path.join(temp, 'drafts.json'), { note: 'Черновики не являются сохранёнными ответами. Не оценивать без решения организатора.', drafts });
       await json(path.join(temp, 'events.json'), a.events);
       await fsp.writeFile(path.join(temp, 'answers.csv'), '\ufeff' + ['Задание;Тип;Сохранён;Ответ или файл;Время сохранения', ...answers.map(r => [r.task, r.kind, r.saved ? 'да' : 'нет', r.answer ?? r.file?.path ?? '', r.savedAt].map(csv).join(';'))].join('\r\n'), { mode: 0o600 });

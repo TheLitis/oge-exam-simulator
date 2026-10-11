@@ -169,21 +169,23 @@ async function startServer({ root, resultsRoot, open = true, port = 0, lock = tr
         }
         if (url.pathname === '/api/package') { const file = await serial(() => service.exportFile(url.searchParams.get('id'))); await sendFile(res, file, 'application/zip', 'exam.oge'); return; }
         if (url.pathname === '/api/result') { const a = service.attempt; check(a?.status === 'finished' && a.archivePath, 'Итоговый ZIP пока недоступен.'); await sendFile(res, a.archivePath, 'application/zip', path.basename(a.archivePath)); return; }
+        if (url.pathname === '/api/review/report') { const file=await serial(()=>service.reviewReport(url.searchParams.get('id'))); await sendFile(res,file,'application/zip','reviewed-results.zip'); return; }
         if (url.pathname === '/api/health') return reply(res, { ok: true, pid: process.pid });
         throw new UserError('Не найдено.', 404);
       }
       check(req.method === 'POST', 'Недопустимый метод.');
       if (url.pathname === '/api/upload') {
         const kind = url.searchParams.get('kind'), name = url.searchParams.get('name'); safeName(name);
-        check(['image', 'resource', 'answer', 'package'].includes(kind), 'Некорректный тип файла.');
+        check(['image', 'resource', 'answer', 'package', 'review'].includes(kind), 'Некорректный тип файла.');
         check(uploads < 2, 'Дождитесь завершения предыдущей загрузки.');
-        const limit = kind === 'package' ? LIMITS.archive : kind === 'image' ? LIMITS.image : LIMITS.file;
+        const limit = ['package','review'].includes(kind) ? LIMITS.archive : kind === 'image' ? LIMITS.image : LIMITS.file;
         if (req.headers['content-length']) check(Number(req.headers['content-length']) <= limit, 'Файл превышает допустимый размер.');
         uploads++; temp = path.join(root, 'incoming', crypto.randomUUID());
         try {
           await boundedCopy(req, temp, limit);
           const id = Number(url.searchParams.get('task'));
           const result = await serial(() => kind === 'package' ? service.importExam(temp, url.searchParams.get('edit') === '1')
+            : kind === 'review' ? service.importReview(temp)
             : kind === 'answer' ? service.attachFile(id, temp, name)
             : service.addEditorAsset(temp, name, id, kind, url.searchParams.get('auto') === '1'));
           reply(res, { ok: true, value: result });
@@ -196,6 +198,8 @@ async function startServer({ root, resultsRoot, open = true, port = 0, lock = tr
         case '/api/theme': result = await serial(() => service.setTheme(b.theme)); break;
         case '/api/editor/new': result = await serial(() => service.newEditor()); break;
         case '/api/editor/update': result = await serial(() => service.updateEditor(b)); break;
+        case '/api/editor/checker': result = await serial(() => service.setEditorChecker(b)); break;
+        case '/api/review/check': result = await serial(() => service.checkReview(b)); break;
         case '/api/editor/remove': result = await serial(() => service.removeEditorAsset(b.id)); break;
         case '/api/editor/export': result = await serial(() => service.exportExam(b.publish)); break;
         case '/api/demo': result = await serial(() => service.importExam(path.join(__dirname, '../examples/demo.oge'), b.edit === true)); break;

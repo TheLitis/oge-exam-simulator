@@ -2,6 +2,7 @@
 const { promisify } = require('node:util');
 const { fsp, path, crypto, check, safeName, safeRelative, inside, hashFile, rasterMime, LIMITS } = require('./io.cjs');
 const scrypt = promisify(crypto.scrypt);
+const { validateChecker } = require('./grading.cjs');
 const DURATION = 9000;
 const IMAGE_NAME = /^(\d{1,2})\.(\d+)\.(png|jpe?g|gif|webp|bmp)$/i;
 const lexical = (a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0;
@@ -48,6 +49,7 @@ function validateShape(exam, requirePublished = false) {
   const ids = new Set(); let count = 1, total = 0;
   for (let i = 0; i < 16; i++) {
     const task = exam.tasks[i]; check(task && task.id === i + 1, 'Задания должны идти от 1 до 16.');
+    validateChecker(task.id, task.checker);
     check(Array.isArray(task.images) && task.images.length <= 16 && Array.isArray(task.resources) && task.resources.length <= 16, 'Слишком много файлов в задании (максимум 16 каждого типа).');
     check(hasResources(task.id) || task.resources.length === 0, 'Исходные файлы допустимы только в заданиях 11–14.');
     if (exam.published || requirePublished) {

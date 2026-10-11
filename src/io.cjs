@@ -75,7 +75,7 @@ async function boundedCopy(input, out, limit = LIMITS.file) {
 // Own package format uses ASCII UUID paths, not arbitrary ZIP names. Inspect the
 // central directory BEFORE inflation so forged sizes / zip bombs cannot allocate
 // unbounded memory. ZIP64, split archives, encrypted files and symlinks are rejected.
-function preflightZip(buf) {
+function preflightZip(buf, requiredName = 'manifest.json') {
   check(Buffer.isBuffer(buf) && buf.length >= 22 && buf.length <= LIMITS.archive, 'Некорректный или слишком большой архив.');
   let eocd = -1;
   for (let i = buf.length - 22; i >= Math.max(0, buf.length - 65557); i--) {
@@ -93,10 +93,14 @@ function preflightZip(buf) {
     const attrs = buf.readUInt32LE(p + 38), mode = (attrs >>> 16) & 0xf000;
     check(p + 46 + nl + el + cl <= eocd && !(flags & 1) && (method === 0 || method === 8), 'Архив зашифрован или имеет неподдерживаемый формат.');
     const name = buf.subarray(p + 46, p + 46 + nl).toString('utf8');
-    check(name === 'assets/' || safeRelative(name), 'Недопустимый файл архива.');
+    if (requiredName === 'answers.json') {
+      const roots = ['answers.json','candidate.json','drafts.json','events.json','answers.csv','report.html','README.txt','SHA256.json','grading-context.json'];
+      const answerPath = /^(?:files|draft-files)\/task-(?:[1-9]|1[0-6])\/([^/]+)$/.exec(name);
+      check(roots.includes(name) || (answerPath && safeName(answerPath[1])), 'Недопустимый файл архива результатов.');
+    } else check(name === 'assets/' || safeRelative(name), 'Недопустимый файл архива.');
     check(!seen.has(name.toLowerCase()), 'В архиве повторяются имена файлов.'); seen.add(name.toLowerCase());
     check(mode !== 0xa000 && (mode === 0 || mode === 0x8000 || (mode === 0x4000 && name === 'assets/')), 'Специальные файлы и ссылки не допускаются.');
-    check(length <= (name === 'manifest.json' ? LIMITS.json : LIMITS.file) && compressed <= LIMITS.archive, 'Слишком большой файл в архиве.');
+    check(length <= (name === requiredName ? LIMITS.json : LIMITS.file) && compressed <= LIMITS.archive, 'Слишком большой файл в архиве.');
     check(local + 30 <= start && buf.readUInt32LE(local) === 0x04034b50, 'Повреждён заголовок файла ZIP.');
     const ln = buf.readUInt16LE(local + 26), le = buf.readUInt16LE(local + 28);
     check(local + 30 + ln + le + compressed <= start, 'Данные ZIP выходят за границы архива.');
@@ -105,7 +109,7 @@ function preflightZip(buf) {
     if (name !== 'assets/') entries.push({ name, size: length });
     p += 46 + nl + el + cl;
   }
-  check(p === eocd && seen.has('manifest.json'), 'В архиве нет manifest.json или повреждён каталог.');
+  check(p === eocd && seen.has(requiredName), `В архиве нет ${requiredName} или повреждён каталог.`);
   return entries;
 }
 async function extractPackage(file, dest) {
