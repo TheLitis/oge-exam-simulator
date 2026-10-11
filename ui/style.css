@@ -434,6 +434,10 @@ dialog::backdrop { background: var(--backdrop); }
 dialog h2 { font-size: 23px; margin-bottom: 15px; letter-spacing: -.6px; }
 dialog p { color: var(--muted); font-size: 14px; line-height: 1.7; white-space: pre-line; }
 dialog .button-row { justify-content: flex-end; margin-top: 26px; }
+.teacher-access-form { display: grid; gap: 16px; }
+.teacher-access-form h2, .teacher-access-form p { margin: 0; }
+.teacher-access-form .button-row { margin-top: 8px; }
+.teacher-access-form .form-error:empty { display: none; }
 #toast { display: none; max-width: min(580px, calc(100vw - 32px)); padding: 11px 16px; border-radius: 9px; background: var(--toast-bg); color: var(--toast-ink); font-size: 12px; line-height: 1.5; box-shadow: var(--shadow); overflow-wrap: anywhere; pointer-events: none; position: fixed; left: 50%; bottom: 20px; transform: translateX(-50%); z-index: 100; }
 #toast.visible { display: block; animation: feedback-in 160ms ease-out; }
 #toast.error { background: #853e38; color: #fff; }

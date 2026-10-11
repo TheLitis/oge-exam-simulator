@@ -29,7 +29,7 @@ test('Office keys survive teacher project/restart, but never enter published exa
   assert.equal((await manifest(project)).tasks[12].checker.criteria.length, 3);
   assert.equal((await manifest(published)).tasks.some(task => Object.hasOwn(task, 'checker')), false);
   const restored = new ExamService(root); await restored.init();
-  assert.equal(restored.state().editor.tasks[13].checker.type, 'presentation');
+  assert.equal(restored.state({teacherAccess:true}).editor.tasks[13].checker.type, 'presentation');
   await s.importExam(s.exportFile(published.id)); await s.start(PERSON, 'DEMO-2026');
   assert.equal(s.state().editor, null); assert.equal(JSON.stringify(s.state().exam).includes('criteria'), false);
   assert.equal(Object.hasOwn(s.task(13), 'checker'), false);

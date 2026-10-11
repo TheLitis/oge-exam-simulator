@@ -42,7 +42,7 @@ test('project keeps optional keys, published exam strips them, pupil API never e
   await assert.rejects(s.importReview(DEMO));
   await s.finish(); await s.dismissResult();
   const restored=new ExamService(root,{codeRunner:s.codeRunner}); await restored.init();
-  assert.deepEqual(restored.state().editor.tasks[0].checker,short);
+  assert.deepEqual(restored.state({teacherAccess:true}).editor.tasks[0].checker,short);
 });
 test('teacher review checks submitted answers, distinguishes drafts, runs code only on explicit review, exports verified ZIP',async t=>{
   const {s,executions,requests}=await completed(t), source=s.attempt.archivePath, sourceHash=await hashFile(source);
@@ -80,6 +80,12 @@ test('old result ZIP without context remains readable with explicit teacher conf
   const review=await s.importReview(old); assert.equal(review.contextMatch,null); await assert.rejects(s.checkReview({id:review.id}));
   assert.equal((await s.checkReview({id:review.id,allowUnmatched:true})).tasks[0].status,'correct');
 });
+test('ordinary result ZIP comments are rejected without running submitted code',async t=>{
+  const {s,root,executions}=await completed(t), zip=await JSZip.loadAsync(await fsp.readFile(s.attempt.archivePath));
+  const file=path.join(root,'commented-result.zip');
+  await fsp.writeFile(file,await zip.generateAsync({type:'nodebuffer',comment:'An ordinary archive note'}));
+  await assert.rejects(s.importReview(file),/Комментарии ZIP/); assert.equal(executions(),0);
+});
 test('corrupted, unhashed and duplicate result archives are rejected before code runs',async t=>{
   const {s,root,executions}=await completed(t);
   for (const variant of ['corrupt','unhashed','wrongSaved']) {
@@ -105,12 +111,16 @@ test('HTTP teacher checker/review routes require auth, reject active sessions an
     const r=await fetch(app.url+route,{method:'POST',headers:{...headers,'Content-Type':'application/json'},body:JSON.stringify(data)});return {status:r.status,body:await r.json()};
   };
   assert.equal((await fetch(app.url+'/api/editor/checker',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'})).status,401);
+  const access=await post('/api/teacher/setup',{password:'Review teacher password 2026'});
+  assert.equal(access.status,200); headers['X-Teacher-Token']=access.body.value.token;
   assert.equal((await post('/api/demo',{edit:true})).status,200);
   assert.equal((await post('/api/editor/checker',{taskId:1,checker:short})).status,200);
   assert.equal((await post('/api/editor/checker',{taskId:1,checker:{type:'code',language:'python',tests:[]}})).status,400);
   await post('/api/demo',{});await post('/api/start',{candidate:PERSON,code:'DEMO-2026'});
-  assert.equal((await post('/api/editor/checker',{taskId:1,checker:short})).status,400);
+  assert.equal((await post('/api/editor/checker',{taskId:1,checker:short})).status,403);
   await post('/api/save',{id:1,text:'160'});await post('/api/finish',{confirm:true});
+  const reopened=await post('/api/teacher/unlock',{password:'Review teacher password 2026'});
+  assert.equal(reopened.status,200); headers['X-Teacher-Token']=reopened.body.value.token;
   const r=await fetch(app.url+'/api/upload?kind=review&name=result.zip',{method:'POST',headers,body:await fsp.readFile(app.service.attempt.archivePath)});
   assert.equal(r.status,200);const review=(await r.json()).value;
   const grade=await post('/api/review/check',{id:review.id});assert.equal(grade.status,200);assert.equal(grade.body.value.tasks[0].status,'correct');

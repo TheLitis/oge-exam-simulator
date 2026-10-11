@@ -7,6 +7,7 @@ const { version } = require('../package.json');
 const G = require('./grading.cjs');
 const CodeRunner = require('./code-runner.cjs');
 const R = require('./review.cjs');
+const { TeacherProtection, publicEditor, isProtectedProject, readLegacyPackage } = require('./teacher.cjs');
 const clone = value => structuredClone(value);
 const iso = ms => new Date(ms).toISOString();
 const html = value => String(value ?? '').replace(/[&<>"']/g, c => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[c]));
@@ -20,6 +21,10 @@ class ExamService {
     this.lastCheckpoint = 0; this.nextActivationAt = 0; this.badCodes = 0;
     this.lastError = null; this.recovered = false;
     this.codeRunner = codeRunner; this.checking = null;
+    this.teacherTemporaries = new Set();
+    this.teacher = new TeacherProtection(this.dir('teacher'), { monotonic: this.monotonic, onLock: () => {
+      this.editor = publicEditor(this.editor); this.clearTeacherTemporaries();
+    } });
   }
   dir(...parts) { return path.join(this.root, ...parts); }
   attemptDir() { return this.dir('sessions', this.attempt.id); }
@@ -31,8 +36,19 @@ class ExamService {
     // Incoming uploads are never submitted answers and are safe to discard after a restart.
     for (const n of await fsp.readdir(this.dir('incoming'))) await fsp.rm(this.dir('incoming', n), { force: true });
     try { this.config = await readJson(this.dir('config.json'), true); } catch (e) { if (e.code !== 'ENOENT') this.lastError = 'Настройки повреждены; выполнен поиск сохранённого сеанса.'; }
-    try { this.editor = M.validateShape(await readJson(this.dir('editor/manifest.json'), true)); }
-    catch { this.editor = M.blankExam(); await this.persistEditor(this.editor); }
+    let savedEditor, backupEditor;
+    try { savedEditor = await readJson(this.dir('editor/manifest.json')); } catch {}
+    try { backupEditor = await readJson(this.dir('editor/manifest.json.bak')); } catch {}
+    await this.teacher.init({ required: this.config.teacherProtection === 1 || savedEditor?.teacherProtected === true || backupEditor?.teacherProtected === true });
+    await this.cleanTeacherRuntime();
+    let editorValid = true;
+    try { this.editor = M.validateShape(savedEditor || backupEditor); }
+    catch { this.editor = M.blankExam(); editorValid = false; }
+    if (this.teacherConfigured()) {
+      this.editor = publicEditor(this.editor);
+      await this.writePublicEditor(this.editor, backupEditor);
+      if (this.config.teacherProtection !== 1) await this.persistConfig({ teacherProtection: 1 });
+    } else if (!editorValid) await this.persistEditor(this.editor);
     await this.migrateResults();
     if (/^[a-f0-9-]{36}$/.test(this.config.examId ?? '')) {
       try {
@@ -78,8 +94,112 @@ class ExamService {
   }
   async persistEditor(next) {
     M.validateShape(next); check(Buffer.byteLength(JSON.stringify(next)) <= LIMITS.json, 'Проект с эталонами превышает 1 МБ. Сократите тесты.');
-    await json(this.dir('editor/manifest.json'), next, true); this.editor = next;
+    if (this.teacherConfigured()) {
+      await this.teacher.save(next);
+      await json(this.dir('editor/manifest.json'), publicEditor(next), true);
+      await fsp.chmod(this.dir('editor/manifest.json.bak'), 0o600);
+      this.editor = this.teacher.unlocked() ? next : publicEditor(next);
+    } else { await json(this.dir('editor/manifest.json'), next, true); this.editor = next; }
   }
+  teacherConfigured() { return this.teacher.configured(); }
+  teacherAuthorized(token) { return this.teacher.authorized(token); }
+  assertTeacherUnlocked() { if (this.teacherConfigured()) this.teacher.assertUnlocked(); }
+  clearTeacherTemporaries() {
+    for (const file of this.teacherTemporaries) {
+      try { fs.rmSync(file, { recursive: true, force: true }); this.teacherTemporaries.delete(file); }
+      catch { this.lastError = 'Не удалось удалить временный отчёт учителя. Закройте его и повторите блокировку.'; }
+    }
+  }
+  async cleanTeacherRuntime() {
+    const dir = this.dir('teacher/runtime'); await mkdir(dir);
+    const stat = await fsp.lstat(dir); check(stat.isDirectory() && !stat.isSymbolicLink(), 'Папка временных файлов учителя недоступна.');
+    await fsp.chmod(dir, 0o700);
+    for (const name of await fsp.readdir(dir)) {
+      if (/^(?:workspace|report|import|migration)-[a-f0-9-]{36}(?:\.zip)?$/.test(name)) await fsp.rm(path.join(dir, name), { recursive: true, force: true });
+    }
+  }
+  async writePublicEditor(editor, backup = editor) {
+    let previous = editor;
+    try { previous = M.validateShape(backup); } catch {}
+    await fsp.chmod(this.dir('editor'), 0o700);
+    await json(this.dir('editor/manifest.json'), publicEditor(editor));
+    await json(this.dir('editor/manifest.json.bak'), publicEditor(previous));
+  }
+  async protectStoredTeacherFiles() {
+    this.assertTeacherUnlocked();
+    for (const entry of await fsp.readdir(this.dir('exports'), { withFileTypes: true })) {
+      if (!entry.isFile() || !/^[a-f0-9-]{36}\.oge$/.test(entry.name)) continue;
+      const file = this.dir('exports', entry.name); if (await isProtectedProject(file)) continue;
+      let legacy;
+      try { legacy = await readLegacyPackage(file); M.validateShape(legacy.manifest); }
+      catch (e) { if (e.code === 'ENOENT') continue; legacy = null; }
+      if (legacy?.manifest.published && !legacy.manifest.tasks.some(task => task.checker)) continue;
+      if (!legacy) {
+        // Keep unrecognized historical bytes recoverable under the vault key,
+        // without treating them as an exam or leaving private plaintext behind.
+        await this.teacher.protectProject(file, file, { allowLegacySize: true }); continue;
+      }
+      const temporary = this.dir('teacher/runtime', `migration-${crypto.randomUUID()}.zip`); this.teacherTemporaries.add(temporary);
+      try {
+        await fsp.writeFile(temporary, legacy.buffer, { flag:'wx', mode:0o600 });
+        await this.teacher.protectProject(temporary, file);
+      } finally { await fsp.rm(temporary, { force: true }); this.teacherTemporaries.delete(temporary); }
+    }
+    // Older editor imports left their unpacked project in the exams cache.
+    // Retain the course assets and encrypt only its private manifest.
+    for (const id of await fsp.readdir(this.dir('exams'))) {
+      if (!/^[a-f0-9-]{36}$/.test(id)) continue;
+      const file=this.dir('exams',id,'manifest.json');
+      try {
+        if(await isProtectedProject(file))continue;
+        let project;
+        try { project=M.validateShape(await readJson(file)); } catch(e){if(e.code==='ENOENT')continue;}
+        if(!project?.published || project.tasks.some(task=>task.checker))await this.teacher.protectProject(file,file,{allowLegacySize:true});
+      } catch(e){if(e.code!=='ENOENT')throw e;}
+    }
+    for (const id of await fsp.readdir(this.dir('reviews'))) {
+      if (!/^[a-f0-9-]{36}$/.test(id)) continue;
+      for (const name of ['assessment.json', 'assessment.html', 'assessment.csv', 'SHA256.json', 'reviewed-results.zip']) {
+        const file = this.dir('reviews', id, name);
+        try { if (!await isProtectedProject(file)) await this.teacher.protectProject(file); }
+        catch (e) { if (e.code !== 'ENOENT') throw e; }
+      }
+    }
+  }
+  async configureTeacher(password) {
+    this.assertIdle();
+    if (this.teacherConfigured()) throw new UserError('Пароль учителя уже настроен.', 409);
+    const editor = this.editor; let backupEditor = editor, legacyBackup;
+    try {
+      const file = this.dir('editor/manifest.json.bak'), stat = await fsp.lstat(file);
+      check(stat.isFile() && !stat.isSymbolicLink() && stat.size <= LIMITS.json, 'Резервный проект недоступен или слишком большой.');
+      const originalBackup = await fsp.readFile(file);
+      try { backupEditor = M.validateShape(JSON.parse(originalBackup.toString('utf8'))); }
+      catch { legacyBackup = { encoding:'base64', data:originalBackup.toString('base64') }; }
+    } catch (e) { if (e.code !== 'ENOENT') throw e; }
+    try {
+      const result = await this.teacher.configure(password, editor, { backupEditor, legacyBackup }); this.editor = editor;
+      await this.protectStoredTeacherFiles(); await this.writePublicEditor(editor, backupEditor);
+      await this.persistConfig({ teacherProtection: 1, teacherFilesProtected: 1 }); return result;
+    } catch (e) {
+      if (this.teacherConfigured()) {
+        this.teacher.lock(); await this.writePublicEditor(editor, backupEditor).catch(() => {});
+        await this.persistConfig({ teacherProtection: 1 }).catch(() => {});
+      }
+      throw e;
+    }
+  }
+  async unlockTeacher(password) {
+    this.assertIdle(); let established = false;
+    try {
+      const { token, editor } = await this.teacher.unlock(password); established = true; M.validateShape(editor); this.editor = editor;
+      if (this.config.teacherFilesProtected !== 1) {
+        await this.protectStoredTeacherFiles(); await this.persistConfig({ teacherFilesProtected: 1 });
+      }
+      return { token };
+    } catch (e) { if(established)this.teacher.lock(); throw e; }
+  }
+  async lockTeacher() { this.teacher.lock(); this.clearTeacherTemporaries(); return this.state(); }
   async persistConfig(patch) { const next = { ...this.config, ...patch }; await json(this.dir('config.json'), next, true); this.config = next; }
   async migrateResults() {
     if (this.resultsRoot === this.dir('results')) return;
@@ -115,7 +235,7 @@ class ExamService {
   publicExam(exam, includeCheckers = false) {
     if (!exam) return null;
     return { id: exam.id, title: exam.title, published: exam.published, durationSeconds: M.DURATION,
-      hasActivation: !!exam.activation,
+      hasActivation: !!(exam.activation || exam.teacherHasActivation),
       tasks: exam.tasks.map(t => ({ id: t.id, kind: M.taskKind(t.id), hasResources: M.hasResources(t.id),
         images: [...t.images].sort(M.lexical).map(({ id, name, size }) => ({ id, name, size })),
         resources: t.resources.map(({ id, name, size }) => ({ id, name, size })),
@@ -130,19 +250,25 @@ class ExamService {
       statuses, savedCount: statuses.filter(s => s.saved).length, dirtyCount: statuses.filter(s => s.dirty).length,
       resultDir: a.resultDir || null, archiveReady: !!a.archivePath, exportError: a.exportError || null, recovered: this.recovered };
   }
-  state() { return { version, theme: this.theme(), exam: this.publicExam(this.exam), editor: this.attempt?.status === 'active' ? null : this.publicExam(this.editor, true), session: this.sessionView(), checking:this.checking, resultsRoot: this.resultsRoot, warning: this.lastError }; }
-  async newEditor() { this.assertIdle(); await this.persistEditor(M.blankExam()); return this.publicExam(this.editor, true); }
+  state({ teacherAccess = false } = {}) {
+    const idle = this.attempt?.status !== 'active', allowed = !!teacherAccess && (!this.teacherConfigured() || this.teacher.unlocked()) && idle;
+    // Expiry also discards the decrypted editor when the caller is a pupil.
+    this.teacher.unlocked();
+    return { version, theme: this.theme(), exam: this.publicExam(this.exam), editor: idle ? this.publicExam(this.editor, allowed) : null,
+      teacher: { configured: this.teacherConfigured(), unlocked: allowed }, session: this.sessionView(), checking:this.checking, resultsRoot:this.resultsRoot, warning:this.lastError };
+  }
+  async newEditor() { this.assertIdle(); this.assertTeacherUnlocked(); await this.persistEditor(M.blankExam()); return this.publicExam(this.editor, true); }
   async setEditorChecker({taskId, checker} = {}) {
-    this.assertIdle(); M.taskKind(taskId); const value=G.validateChecker(taskId, checker);
+    this.assertIdle(); this.assertTeacherUnlocked(); M.taskKind(taskId); const value=G.validateChecker(taskId, checker);
     const next=clone(this.editor); next.published=false;
     if (value) next.tasks[taskId-1].checker=value; else delete next.tasks[taskId-1].checker;
     await this.persistEditor(next); return this.publicExam(this.editor, true);
   }
   async importReview(file) {
-    this.assertIdle(); return R.reviewView(await R.importResult(file, this.dir('reviews'), this.editor));
+    this.assertIdle(); this.assertTeacherUnlocked(); return R.reviewView(await R.importResult(file, this.dir('reviews'), this.editor));
   }
   async loadReview(id) {
-    this.assertIdle(); check(typeof id==='string' && /^[a-f0-9-]{36}$/.test(id), 'Некорректный идентификатор работы.');
+    this.assertIdle(); this.assertTeacherUnlocked(); check(typeof id==='string' && /^[a-f0-9-]{36}$/.test(id), 'Некорректный идентификатор работы.');
     const record=await readJson(this.dir('reviews',id,'review.json')); check(record.id===id && record.attempt?.answers, 'Работа повреждена. Откройте ZIP повторно.');
     record.contextMatch=record.context?R.contextMatches(record.context,this.editor):null; return record;
   }
@@ -152,15 +278,28 @@ class ExamService {
     check(record.contextMatch===true || allowUnmatched, 'Сопоставьте вариант с проектом и подтвердите использование эталонов.');
     const assessment=await G.assessExam({exam:clone(this.editor),attempt:record.attempt,attemptDir:this.dir('reviews',id),examDir:this.dir('editor'),runCode:options=>this.codeRunner.runCode(options)});
     assessment.projectSha256=crypto.createHash('sha256').update(JSON.stringify(this.editor)).digest('hex');
-    await R.writeReviewReport(record,assessment,this.dir('reviews',id));
+    if (this.teacherConfigured()) {
+      const dir=this.dir('teacher/runtime',`workspace-${crypto.randomUUID()}`); this.teacherTemporaries.add(dir);
+      try {
+        await mkdir(dir); await fsp.copyFile(this.dir('reviews',id,'original-results.zip'),path.join(dir,'original-results.zip'));
+        await R.writeReviewReport(record,assessment,dir);
+        for (const name of ['assessment.json','assessment.html','assessment.csv','SHA256.json','reviewed-results.zip'])
+          await this.teacher.protectProject(path.join(dir,name),this.dir('reviews',id,name));
+      } finally { await fsp.rm(dir,{recursive:true,force:true}); this.teacherTemporaries.delete(dir); }
+    } else await R.writeReviewReport(record,assessment,this.dir('reviews',id));
     await json(this.dir('reviews',id,'review.json'),record); return assessment;
   }
   async reviewReport(id) {
     await this.loadReview(id); const file=this.dir('reviews',id,'reviewed-results.zip');
-    check(fs.existsSync(file), 'Сначала проверьте работу.'); return file;
+    check(fs.existsSync(file), 'Сначала проверьте работу.');
+    if (!this.teacherConfigured()) return file;
+    const temporary=this.dir('teacher/runtime',`report-${crypto.randomUUID()}.zip`); this.teacherTemporaries.add(temporary);
+    try { await this.teacher.openProject(file,temporary); }
+    catch (e) { this.teacherTemporaries.delete(temporary); throw e; }
+    return { file:temporary, cleanup:async()=>{await fsp.rm(temporary,{force:true});this.teacherTemporaries.delete(temporary);} };
   }
   async updateEditor({ title, code, generateCode = false } = {}) {
-    this.assertIdle(); const next = clone(this.editor); next.published = false;
+    this.assertIdle(); this.assertTeacherUnlocked(); const next = clone(this.editor); next.published = false;
     if (title !== undefined) { check(typeof title === 'string', 'Некорректное название.'); next.title = title.trim(); }
     let newCode = null;
     if (generateCode) code = crypto.randomBytes(6).toString('hex').toUpperCase().match(/.{4}/g).join('-');
@@ -168,7 +307,7 @@ class ExamService {
     await this.persistEditor(next); return { editor: this.publicExam(this.editor, true), code: newCode };
   }
   async addEditorAsset(file, name, taskId, kind, auto = false) {
-    this.assertIdle(); safeName(name); check(['image', 'resource'].includes(kind), 'Некорректный тип вложения.');
+    this.assertIdle(); this.assertTeacherUnlocked(); safeName(name); check(['image', 'resource'].includes(kind), 'Некорректный тип вложения.');
     if (auto) {
       const parsed = M.parseImageName(name); if (!parsed) return { ignored: name };
       taskId = parsed.taskId; kind = 'image';
@@ -195,32 +334,50 @@ class ExamService {
     return { taskId, editor: this.publicExam(this.editor, true) };
   }
   async removeEditorAsset(id) {
-    this.assertIdle(); const next = clone(this.editor); next.published = false;
+    this.assertIdle(); this.assertTeacherUnlocked(); const next = clone(this.editor); next.published = false;
     for (const t of next.tasks) { t.images = t.images.filter(a => a.id !== id); t.resources = t.resources.filter(a => a.id !== id); }
     await this.persistEditor(next); return this.publicExam(this.editor, true);
   }
   async exportExam(publish = true) {
-    this.assertIdle(); check(typeof publish === 'boolean', 'Некорректное состояние публикации.');
+    this.assertIdle(); this.assertTeacherUnlocked(); check(typeof publish === 'boolean', 'Некорректное состояние публикации.');
     const next = clone(this.editor); next.id = crypto.randomUUID(); next.published = publish;
     if (publish) for (const task of next.tasks) delete task.checker;
     await M.validateFiles(next, this.dir('editor'), publish);
     const out = this.dir('exports', `${next.id}.oge`);
     const files = [{ name: 'manifest.json', data: JSON.stringify(next, null, 2) }];
     for (const t of next.tasks) for (const a of [...t.images, ...t.resources]) files.push({ name: a.path, file: this.dir('editor', a.path) });
-    await writeZip(files, out);
-    check((await fsp.stat(out)).size <= LIMITS.archive, 'Упакованный экзамен больше 256 МБ. Уменьшите размеры исходных файлов.');
+    if (!publish && this.teacherConfigured()) {
+      const temporary=this.dir('teacher/runtime',`report-${crypto.randomUUID()}.zip`); this.teacherTemporaries.add(temporary);
+      try { await writeZip(files,temporary); await this.teacher.protectProject(temporary,out); }
+      finally { await fsp.rm(temporary,{force:true});this.teacherTemporaries.delete(temporary); }
+    } else {
+      await writeZip(files,out);
+      check((await fsp.stat(out)).size<=LIMITS.archive,'Упакованный экзамен больше 256 МБ. Уменьшите размеры исходных файлов.');
+    }
     return { id: next.id, name: publish ? 'exam.oge' : 'project.oge', published: publish };
   }
-  async importExam(file, edit = false) {
-    this.assertIdle(); const id = crypto.randomUUID(), dir = this.dir('exams', id);
+  async importExam(file, edit = false, projectPassword) {
+    this.assertIdle(); if (edit) this.assertTeacherUnlocked(); const id = crypto.randomUUID();
+    const dir = edit ? this.dir('teacher/runtime', `workspace-${id}`) : this.dir('exams', id);
+    if(edit)this.teacherTemporaries.add(dir);
+    let decrypted;
     try {
-      const exam = await extractPackage(file, dir); await M.validateFiles(exam, dir, !edit);
+      if (await isProtectedProject(file)) {
+        check(edit, 'Защищённый проект нужно открыть в режиме учителя.');
+        decrypted=this.dir('teacher/runtime',`import-${crypto.randomUUID()}.zip`);this.teacherTemporaries.add(decrypted);
+        await this.teacher.openProject(file,decrypted,projectPassword);
+      }
+      const exam = await extractPackage(decrypted||file, dir); await M.validateFiles(exam, dir, !edit);
       if (edit) {
         for (const t of exam.tasks) for (const a of [...t.images, ...t.resources]) await fsp.copyFile(path.join(dir, a.path), this.dir('editor', a.path));
         exam.published = false; await this.persistEditor(exam); return this.publicExam(this.editor, true);
       }
-      await this.persistConfig({ examId: id }); this.exam = exam; this.examDir = dir; return this.publicExam(exam);
-    } catch (e) { await fsp.rm(dir, { recursive: true, force: true }); throw e; }
+      await this.persistConfig({ examId: id }); this.exam = exam; this.examDir = dir; await this.lockTeacher(); return this.publicExam(exam);
+    } catch (e) { if(!edit)await fsp.rm(dir, { recursive: true, force: true }); throw e; }
+    finally {
+      if(edit){await fsp.rm(dir,{recursive:true,force:true});this.teacherTemporaries.delete(dir);}
+      if(decrypted){await fsp.rm(decrypted,{force:true});this.teacherTemporaries.delete(decrypted);}
+    }
   }
   async start(input, code) {
     this.assertIdle(); check(this.exam, 'Сначала загрузите экзамен.'); M.validateShape(this.exam, true);
@@ -232,6 +389,7 @@ class ExamService {
     }
     this.badCodes = 0; this.nextActivationAt = 0;
     await M.validateFiles(this.exam, this.examDir, true);
+    await this.lockTeacher();
     const id = crypto.randomUUID(), dir = this.dir('sessions', id);
     await mkdir(dir); await fsp.cp(this.examDir, path.join(dir, 'exam'), { recursive: true });
     const now = this.now();
@@ -283,12 +441,14 @@ class ExamService {
   }
   asset(id) {
     check(typeof id === 'string' && /^[a-f0-9-]{36}$/.test(id), 'Некорректный файл.');
+    if(this.attempt?.status!=='active')this.assertTeacherUnlocked();
     const contexts = this.attempt?.status === 'active' ? [[this.sessionExam, path.join(this.attemptDir(), 'exam')]] : [[this.editor, this.dir('editor')]];
     for (const [exam, dir] of contexts) for (const t of exam.tasks) for (const a of [...t.images, ...t.resources]) if (a.id === id) return { ...a, file: inside(dir, a.path), isImage: t.images.includes(a) };
     throw new UserError('Файл не найден или недоступен в этом режиме.', 404);
   }
-  exportFile(id) { check(/^[a-f0-9-]{36}$/.test(id), 'Некорректный идентификатор.'); this.assertIdle(); return this.dir('exports', `${id}.oge`); }
+  exportFile(id) { check(/^[a-f0-9-]{36}$/.test(id), 'Некорректный идентификатор.'); this.assertIdle(); this.assertTeacherUnlocked(); return this.dir('exports', `${id}.oge`); }
   async pulse(force = false) {
+    this.teacher.unlocked();
     if (this.attempt?.status !== 'active') return;
     if (this.remaining() <= 0) return this.finish('timeout');
     if (force || this.monotonic() - this.lastCheckpoint >= 5000) {

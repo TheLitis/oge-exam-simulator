@@ -3,9 +3,11 @@ const app = document.querySelector('#app');
 const modal = document.querySelector('#modal');
 let token = location.hash.slice(1) || sessionStorage.getItem('oge-key');
 if (token) { sessionStorage.setItem('oge-key', token); history.replaceState(null, '', location.pathname); }
+let teacherToken = null, teacherGeneration = 0;
 const state = { data: null, mode: 'home', task: null, editorTask: 1, editorCode: '', busy: false, zoom: 0, paperOriginal: false, stopped: false, review: null, assessment: null, allowUnmatched: false };
 const imageUrls = new Map();
 const checkerDrafts = new Map();
+const responseGenerations = new WeakMap();
 let toastTimer, draftTimer, metaTimer, pendingDraft = null, pendingTitle = null, draftChain = Promise.resolve(), polling = false, imageGeneration = 0;
 
 function applyTheme(theme) {
@@ -32,21 +34,44 @@ function toast(message, error = false, persistent = false) {
   const el = document.querySelector('#toast'); clearTimeout(toastTimer); el.textContent = message; el.className = 'visible' + (error ? ' error' : '');
   if (!persistent) toastTimer = setTimeout(() => { el.className = ''; }, error ? 7500 : 4200);
 }
-async function request(route, data, upload) {
-  const options = { headers: { Authorization: `Bearer ${token}` }, cache: 'no-store' };
+async function request(route, data, upload, extraHeaders = {}) {
+  const generation = teacherGeneration;
+  const options = { headers: { ...authHeaders(), ...extraHeaders }, cache: 'no-store' };
   if (upload) { options.method = 'POST'; options.body = upload; options.headers['Content-Type'] = 'application/octet-stream'; }
   else if (data !== undefined) { options.method = 'POST'; options.body = JSON.stringify(data); options.headers['Content-Type'] = 'application/json'; }
   let response;
   try { response = await fetch(route, options); } catch { throw new Error('Нет связи с локальным приложением. Не закрывайте страницу; повторите действие после восстановления связи.'); }
   let body;
   try { body = await response.json(); } catch { throw new Error('Не удалось прочитать ответ приложения.'); }
-  if (!response.ok || !body.ok) throw new Error(body.error || 'Не удалось выполнить действие.');
+  assertTeacherGeneration(generation);
+  if (!response.ok || !body.ok) {
+    if (response.status === 403 && teacherToken && !route.startsWith('/api/teacher/')) {
+      clearTeacherView(); if (state.data) { state.mode = 'home'; render(); }
+    }
+    const error = new Error(body.error || 'Не удалось выполнить действие.'); error.code = body.code; throw error;
+  }
+  if (body.value && typeof body.value === 'object') responseGenerations.set(body.value, generation);
   return body.value;
 }
+function currentResponse(value) {
+  if (value && typeof value === 'object' && responseGenerations.has(value)) assertTeacherGeneration(responseGenerations.get(value));
+  return value;
+}
+function assertTeacherGeneration(generation) {
+  if (generation === teacherGeneration) return;
+  const error = new Error('Режим учителя закрыт. Повторите действие.');
+  error.code = 'TEACHER_SESSION_CHANGED'; throw error;
+}
+function authHeaders() {
+  return { Authorization: `Bearer ${token}`, ...(teacherToken ? { 'X-Teacher-Token': teacherToken } : {}) };
+}
 async function download(route, name) {
-  const response = await fetch(route, { headers: { Authorization: `Bearer ${token}` } });
+  const generation = teacherGeneration;
+  const response = await fetch(route, { headers: authHeaders(), cache: 'no-store' });
+  assertTeacherGeneration(generation);
   if (!response.ok) { const b = await response.json(); throw new Error(b.error || 'Не удалось скачать файл.'); }
-  const blob = await response.blob(), url = URL.createObjectURL(blob), link = document.createElement('a');
+  const blob = await response.blob(); assertTeacherGeneration(generation);
+  const url = URL.createObjectURL(blob), link = document.createElement('a');
   link.href = url; link.download = name; document.body.append(link); link.click(); link.remove(); setTimeout(() => URL.revokeObjectURL(url), 60000);
 }
 function setBusy(value) {
@@ -84,6 +109,75 @@ function ask(title, message, confirm = 'Подтвердить', danger = false)
     modal.showModal();
   });
 }
+function clearTeacherView() {
+  teacherGeneration++; teacherToken = null; state.editorCode = ''; checkerDrafts.clear(); pendingTitle = null;
+  clearTimeout(metaTimer); state.review = null; state.assessment = null; state.allowUnmatched = false;
+  imageGeneration++;
+  for (const url of imageUrls.values()) URL.revokeObjectURL(url);
+  imageUrls.clear();
+  if (state.data) { state.data.editor = null; if (state.data.teacher) state.data.teacher.unlocked = false; }
+}
+async function ensureTeacher() {
+  await refresh();
+  if (teacherToken && state.data.teacher?.unlocked) return true;
+  const setup = !state.data.teacher?.configured;
+  const accepted = await new Promise(resolve => {
+    let submitting = false;
+    modal.innerHTML = `<form id="teacher-access-form" class="teacher-access-form" autocomplete="off"><h2 id="modal-title">${setup ? 'Пароль учителя' : 'Вход для учителя'}</h2>${setup ? '<p>Задайте пароль перед работой с учениками. Он защищает проект и эталоны на этом компьютере.</p>' : ''}<label>Пароль<input name="password" type="password" minlength="10" maxlength="128" autocomplete="off" required autofocus></label>${setup ? '<label>Повторите пароль<input name="repeat" type="password" minlength="10" maxlength="128" autocomplete="off" required></label><p class="form-note">От 10 символов. Сохраните пароль: восстановление недоступно.</p>' : ''}<p id="teacher-access-error" class="form-error" role="alert"></p><div class="button-row"><button class="secondary" type="button" data-choice="cancel">Отмена</button><button class="primary" type="submit">${setup ? 'Сохранить' : 'Открыть'}</button></div></form>`;
+    modal.returnValue = '';
+    modal.onclick = e => { if (!submitting && e.target.closest('[data-choice="cancel"]')) modal.close('cancel'); };
+    modal.oncancel = e => { if (submitting) e.preventDefault(); };
+    modal.onsubmit = async e => {
+      e.preventDefault(); if (submitting) return;
+      const form = e.target, error = form.querySelector('#teacher-access-error');
+      if (setup && form.elements.password.value !== form.elements.repeat.value) { error.textContent = 'Пароли не совпадают.'; return; }
+      submitting = true; error.textContent = '';
+      const password = form.elements.password.value;
+      form.querySelectorAll('input,button').forEach(el => { el.disabled = true; });
+      try {
+        const result = currentResponse(await request(`/api/teacher/${setup ? 'setup' : 'unlock'}`, { password }));
+        teacherGeneration++; teacherToken = result.token; form.reset(); modal.close('ok');
+      } catch (e) { error.textContent = e.message; }
+      finally { submitting = false; form.querySelectorAll('input,button').forEach(el => { el.disabled = false; }); }
+    };
+    modal.onclose = () => {
+      const ok = modal.returnValue === 'ok'; modal.querySelector('form')?.reset();
+      modal.innerHTML = ''; modal.onclick = null; modal.oncancel = null; modal.onsubmit = null; modal.onclose = null; resolve(ok);
+    };
+    modal.showModal();
+  });
+  if (accepted) await refresh();
+  return accepted;
+}
+async function lockTeacher() {
+  try { if (teacherToken) await request('/api/teacher/lock', {}); }
+  finally { clearTeacherView(); state.mode = 'home'; if (state.data) render(); }
+  await refresh();
+}
+function projectPassword(message) {
+  return new Promise(resolve => {
+    modal.innerHTML = `<form><h2 id="modal-title">Пароль проекта</h2><p>${V.esc(message)}</p><label>Пароль<input name="password" type="password" minlength="10" maxlength="128" autocomplete="off" required autofocus></label><div class="button-row"><button type="button" class="secondary" data-choice="cancel">Отмена</button><button type="submit" class="primary">Открыть</button></div></form>`;
+    let password = null; modal.returnValue = '';
+    modal.onclick = e => { if (e.target.closest('[data-choice="cancel"]')) modal.close('cancel'); };
+    modal.onsubmit = e => { e.preventDefault(); password = e.target.elements.password.value; modal.close('ok'); };
+    modal.onclose = () => {
+      modal.querySelector('form')?.reset(); modal.innerHTML = ''; modal.onclick = null; modal.onsubmit = null; modal.onclose = null;
+      resolve(modal.returnValue === 'ok' ? password : null);
+    };
+    modal.showModal();
+  });
+}
+async function importProject(file) {
+  const route = `/api/upload?kind=package&edit=1&name=${encodeURIComponent(file.name)}`;
+  let password;
+  for (;;) {
+    try { return currentResponse(await request(route, undefined, file, password ? { 'X-Project-Password': encodeURIComponent(password) } : {})); }
+    catch (e) {
+      if (!['PROJECT_PASSWORD_REQUIRED', 'PROJECT_PASSWORD_INVALID'].includes(e.code)) throw e;
+      password = await projectPassword(e.message); if (password === null) return null;
+    }
+  }
+}
 function pickFiles({ accept = '', multiple = false, directory = false } = {}) {
   return new Promise(resolve => {
     const input = document.querySelector(directory ? '#folder-input' : '#file-input'); input.value = ''; input.accept = accept; input.multiple = multiple || directory;
@@ -99,7 +193,7 @@ async function loadImages() {
     const id = image.dataset.imageId;
     try {
       if (!imageUrls.has(id)) {
-        const response = await fetch(`/api/asset?id=${encodeURIComponent(id)}`, { headers: { Authorization: `Bearer ${token}` } });
+        const response = await fetch(`/api/asset?id=${encodeURIComponent(id)}`, { headers: authHeaders(), cache: 'no-store' });
         if (!response.ok) throw new Error('Изображение условия недоступно.');
         const blob = await response.blob();
         if (generation !== imageGeneration) return;
@@ -166,7 +260,7 @@ async function flushMeta(applyCode = false) {
   const title = document.querySelector('#exam-title')?.value ?? pendingTitle;
   const code = applyCode ? document.querySelector('#editor-code')?.value : undefined;
   if (title === null && !code) return;
-  const result = await request('/api/editor/update', { ...(title !== null ? { title } : {}), ...(code ? { code } : {}) });
+  const result = currentResponse(await request('/api/editor/update', { ...(title !== null ? { title } : {}), ...(code ? { code } : {}) }));
   state.data.editor = result.editor; pendingTitle = null;
   if (result.code) state.editorCode = result.code;
 }
@@ -206,13 +300,17 @@ function markCheckerDirty() {
 async function flushChecker() {
   for (const [taskId, draft] of checkerDrafts) {
     if (!draft.dirty) continue;
-    const editor = await request('/api/editor/checker', { taskId, checker: checkerValue(draft) });
+    const editor = currentResponse(await request('/api/editor/checker', { taskId, checker: checkerValue(draft) }));
     state.data.editor = editor.editor || editor; draft.dirty = false;
   }
 }
 async function flushEditor(applyCode = false) { await flushMeta(applyCode); await flushChecker(); }
 async function refresh() {
-  const next = await request('/api/state'); state.data = next;
+  const next = currentResponse(await request('/api/state')); state.data = next;
+  if (teacherToken && !next.teacher?.unlocked) {
+    clearTeacherView();
+    if (['editor', 'review'].includes(state.mode)) { state.mode = 'home'; render(); toast('Режим учителя закрыт. Введите пароль для продолжения.'); }
+  }
   if (next.session?.status === 'finished' && state.mode === 'exam') {
     if (modal.open) modal.close('expired'); pendingDraft = null; clearTimeout(draftTimer);
     state.mode = 'result'; state.task = null; render(); toast('Экзамен завершён. Новые ответы больше не принимаются.');
@@ -240,7 +338,7 @@ async function importImageFiles(files, auto = true) {
     if (auto && !/^(0?[1-9]|1[0-6])\.\d+\.(png|jpe?g|gif|webp|bmp)$/i.test(f.name)) { ignored++; continue; }
     try {
       toast(`Импорт изображений: ${i + 1} из ${files.length}`, false, true);
-      const v = await request(`/api/upload?kind=image&auto=${auto ? 1 : 0}&task=${state.editorTask}&name=${encodeURIComponent(f.name)}`, undefined, f);
+      const v = currentResponse(await request(`/api/upload?kind=image&auto=${auto ? 1 : 0}&task=${state.editorTask}&name=${encodeURIComponent(f.name)}`, undefined, f));
       if (v.ignored) ignored++; else { state.data.editor = v.editor; count++; }
     } catch (e) { errors.push(`${f.name}: ${e.message}`); }
   }
@@ -279,16 +377,18 @@ const actions = {
       modal.showModal();
     });
   },
-  home: async () => { if (state.mode === 'editor') await flushEditor(); state.mode = 'home'; await refresh(); render(); },
-  editor: async () => { await refresh(); state.mode = 'editor'; render(); },
-  registration: async () => { state.mode = 'registration'; render(); },
+  home: async () => { const leavingTeacher = !!teacherToken; if (state.mode === 'editor') await flushEditor(); await lockTeacher(); state.mode = 'home'; render(); if (leavingTeacher) location.replace(location.pathname); },
+  editor: async () => { if (!await ensureTeacher()) return; state.mode = 'editor'; render(); },
+  'lock-teacher': async () => { if (state.mode === 'editor') await flushEditor(); await lockTeacher(); location.replace(location.pathname); },
+  registration: async () => { await lockTeacher(); state.mode = 'registration'; render(); },
   'open-exam': async () => {
     const [file] = await pickFiles({ accept: '.oge,.zip' }); if (!file) return;
     toast('Проверяем файл экзамена…', false, true);
     state.data.exam = await request(`/api/upload?kind=package&name=${encodeURIComponent(file.name)}`, undefined, file);
+    clearTeacherView();
     state.mode = 'registration'; render(); toast('Вариант загружен. Введите регистрационные данные.');
   },
-  demo: async () => { state.data.exam = await request('/api/demo', {}); state.mode = 'registration'; render(); toast('Код демонстрационного экзамена: DEMO-2026. Используйте вымышленные данные.'); },
+  demo: async () => { state.data.exam = await request('/api/demo', {}); clearTeacherView(); state.mode = 'registration'; render(); toast('Код демонстрационного экзамена: DEMO-2026. Используйте вымышленные данные.'); },
   task: async el => navigate(Number(el.dataset.id)), previous: async () => navigate(state.task.id - 1), next: async () => navigate(state.task.id + 1),
   save,
   attach: async () => {
@@ -318,7 +418,7 @@ const actions = {
   'checker-remove-test': async el => { const draft = getCheckerDraft(); if (draft.tests.length < 2) return; draft.tests.splice(Number(el.dataset.id), 1); markCheckerDirty(); render(); },
   'checker-add-criterion': async () => { const draft = getCheckerDraft(), criteria = draft[`${draft.mode}Criteria`]; if (!criteria || criteria.length >= 32) return; criteria.push(V.officeCriterionDefaults(draft.mode)); markCheckerDirty(); render(); },
   'checker-remove-criterion': async el => { const draft = getCheckerDraft(), criteria = draft[`${draft.mode}Criteria`]; if (!criteria) return; criteria.splice(Number(el.dataset.id), 1); markCheckerDirty(); render(); },
-  'generate-code': async () => { await flushEditor(); const v = await request('/api/editor/update', { generateCode: true }); state.data.editor = v.editor; state.editorCode = v.code; render(); toast('Новый код установлен. Сохраните его отдельно и сообщите ученикам.'); },
+  'generate-code': async () => { await flushEditor(); const v = currentResponse(await request('/api/editor/update', { generateCode: true })); state.data.editor = v.editor; state.editorCode = v.code; render(); toast('Новый код установлен. Сохраните его отдельно и сообщите ученикам.'); },
   'set-code': async () => { await flushEditor(true); render(); toast('Название и код сохранены.'); },
   'import-images': async () => importImageFiles(await pickFiles({ directory: true }), true),
   'import-images-files': async () => importImageFiles(await pickFiles({ multiple: true, accept: imageAccept }), true),
@@ -326,13 +426,13 @@ const actions = {
   'add-resource': async () => {
     const files = await pickFiles({ multiple: true }); if (!files.length) return; await flushEditor();
     for (const f of files) {
-      const v = await request(`/api/upload?kind=resource&task=${state.editorTask}&name=${encodeURIComponent(f.name)}`, undefined, f); state.data.editor = v.editor;
+      const v = currentResponse(await request(`/api/upload?kind=resource&task=${state.editorTask}&name=${encodeURIComponent(f.name)}`, undefined, f)); state.data.editor = v.editor;
     }
     render(); toast('Исходные файлы добавлены.');
   },
   'remove-asset': async el => {
     if (!await ask('Удалить файл из задания?', 'Файл будет удалён из проекта. Оригинал на компьютере останется без изменений.', 'Удалить', true)) return;
-    await flushEditor(); state.data.editor = await request('/api/editor/remove', { id: el.dataset.id }); render(); toast('Файл удалён из задания.');
+    await flushEditor(); state.data.editor = currentResponse(await request('/api/editor/remove', { id: el.dataset.id })); render(); toast('Файл удалён из задания.');
   },
   'export-project': async () => exportEditor(false), 'export-exam': async () => exportEditor(true),
   'open-project': async () => {
@@ -340,25 +440,26 @@ const actions = {
     if (!await ask('Открыть другой проект?', 'Текущий локальный проект будет заменён. Ранее скачанные проекты и экзамены сохранятся.', 'Открыть')) return;
     await flushEditor();
     toast('Проверяем проект…', false, true);
-    state.data.editor = await request(`/api/upload?kind=package&edit=1&name=${encodeURIComponent(file.name)}`, undefined, file);
+    const editor = currentResponse(await importProject(file)); if (!editor) return; state.data.editor = editor;
     state.editorTask = 1; state.editorCode = ''; pendingTitle = null; checkerDrafts.clear(); render(); toast('Проект открыт. Можно сохранить прежний код или установить новый.');
   },
   'new-project': async () => {
     if (!await ask('Начать новый проект?', 'Сначала скачайте текущий проект, если он нужен. Локальный рабочий проект будет заменён.', 'Создать')) return;
-    await flushEditor(); state.data.editor = await request('/api/editor/new', {}); state.editorTask = 1; state.editorCode = ''; pendingTitle = null; checkerDrafts.clear(); render(); toast('Создан новый проект.');
+    await flushEditor(); state.data.editor = currentResponse(await request('/api/editor/new', {})); state.editorTask = 1; state.editorCode = ''; pendingTitle = null; checkerDrafts.clear(); render(); toast('Создан новый проект.');
   },
   'open-review': async () => {
+    if (!await ensureTeacher()) return;
     if (state.mode === 'editor') await flushEditor();
     const [file] = await pickFiles({ accept: '.zip' }); if (!file) return;
     toast('Открываем работу…', false, true);
-    const work = await request(`/api/upload?kind=review&name=${encodeURIComponent(file.name)}`, undefined, file);
+    const work = currentResponse(await request(`/api/upload?kind=review&name=${encodeURIComponent(file.name)}`, undefined, file));
     state.review = work; state.assessment = null; state.allowUnmatched = false; state.mode = 'review'; render(); toast('Работа открыта.');
   },
-  'back-editor': async () => { await refresh(); state.mode = 'editor'; render(); },
+  'back-editor': async () => { if (!await ensureTeacher()) return; state.mode = 'editor'; render(); },
   'check-review': async () => {
     if (state.review.contextMatch !== true && !state.allowUnmatched) throw new Error('Подтвердите использование текущих эталонов.');
     toast('Проверяем ответы…', false, true);
-    state.assessment = await request('/api/review/check', { id: state.review.id, allowUnmatched: state.allowUnmatched });
+    state.assessment = currentResponse(await request('/api/review/check', { id: state.review.id, allowUnmatched: state.allowUnmatched }));
     render(); toast('Проверка завершена.');
   },
   'download-review': async () => { await download(`/api/review/report?id=${encodeURIComponent(state.review.id)}`, `OGE_${state.review.registration}_reviewed-results.zip`); toast('Отчёт передан в загрузки браузера.'); },
@@ -377,9 +478,9 @@ const actions = {
 };
 async function exportEditor(publish) {
   await flushEditor(true); toast(publish ? 'Проверяем задания и собираем экзамен…' : 'Собираем проект…', false, true);
-  const v = await request('/api/editor/export', { publish });
+  const v = currentResponse(await request('/api/editor/export', { publish }));
   await download(`/api/package?id=${encodeURIComponent(v.id)}`, publish ? 'exam.oge' : 'project.oge');
-  render(); toast(publish ? 'Экзамен экспортирован. Передайте ученикам файл exam.oge, код — отдельно.' : 'Проект сохранён вместе с эталонами. Для учеников используйте «Экспорт экзамена».');
+  render(); toast(publish ? 'Экзамен экспортирован. Передайте ученикам файл exam.oge, код — отдельно.' : 'Проект сохранён под паролем учителя. Для учеников используйте «Экспорт экзамена».');
 }
 app.addEventListener('click', e => {
   const el = e.target.closest('[data-action]'); if (!el || el.disabled) return;
@@ -392,7 +493,7 @@ app.addEventListener('submit', e => {
     try {
       const code = b.code; delete b.code;
       state.data.session = await request('/api/start', { candidate: b, code });
-      state.editorCode = ''; checkerDrafts.clear(); state.review = null; state.assessment = null; state.data.editor = null; state.task = await request('/api/task?id=1'); state.mode = 'exam'; render(); toast('Экзамен начался.');
+      clearTeacherView(); state.task = await request('/api/task?id=1'); state.mode = 'exam'; render(); toast('Экзамен начался.');
     } catch (e) { const error = document.querySelector('#registration-error'); if (error) error.textContent = e.message; else throw e; }
   });
 });
@@ -464,3 +565,10 @@ setInterval(async () => {
   } finally { polling = false; }
 }, 1000);
 boot();
+setInterval(async () => {
+  if (!teacherToken || polling || state.busy || state.stopped) return;
+  polling = true;
+  try { await refresh(); }
+  catch { clearTeacherView(); state.mode = 'home'; if (state.data) render(); }
+  finally { polling = false; }
+}, 5000);
