@@ -3,6 +3,7 @@
 const { TextDecoder } = require('node:util');
 const { constants } = require('node:fs');
 const { fsp, path, crypto, check } = require('./io.cjs');
+const { OFFICE_LIMITS, validateOfficeChecker, officeAssessment } = require('./office-grading.cjs');
 
 const LIMITS = Object.freeze({ answers: 16, answerChars: 4096, answerBytes: 16 * 1024, tests: 16,
   testBytes: 16 * 1024, checkerBytes: 64 * 1024, textFileBytes: 1024 * 1024, sourceBytes: 256 * 1024,
@@ -71,6 +72,9 @@ function validateChecker(id, value) {
       return { input: string(item.input, LIMITS.testBytes, 'Входные данные'),
         expected: string(item.expected, LIMITS.testBytes, 'Ожидаемый вывод') };
     }), comparison: comparison(value.comparison) };
+  } else if (['spreadsheet', 'presentation'].includes(value.type)) {
+    check(id >= 13, 'Проверка документа доступна только в заданиях 13–16.');
+    result = validateOfficeChecker(value);
   } else check(false, 'Неизвестный тип автопроверки.');
   check(Buffer.byteLength(JSON.stringify(result), 'utf8') <= LIMITS.checkerBytes,
     'Настройка автопроверки занимает слишком много места.');
@@ -205,12 +209,14 @@ async function assessExam({ exam, attempt, attemptDir, examDir, runCode } = {}) 
       } else {
         check(answer.kind === 'file' && answer.file && /^blobs\/[a-f0-9-]{36}$/.test(answer.file.path), 'Некорректный файл ответа.');
         const entry = await checkedFile(attemptDir, answer.file.path, answer.file,
-          checker.type === 'code' ? LIMITS.sourceBytes : LIMITS.textFileBytes, checker.type === 'code');
-        const text = decode(entry.data);
-        if (checker.type === 'text') {
+          ['spreadsheet', 'presentation'].includes(checker.type) ? OFFICE_LIMITS.fileBytes
+            : checker.type === 'code' ? LIMITS.sourceBytes : LIMITS.textFileBytes, checker.type !== 'text');
+        if (['spreadsheet', 'presentation'].includes(checker.type)) Object.assign(result, await officeAssessment(entry.data, checker));
+        else if (checker.type === 'text') {
+          const text = decode(entry.data);
           const matches = normalize(text, checker) === normalize(checker.expected, checker);
           Object.assign(result, { status: matches ? 'correct' : 'incorrect', message: matches ? 'Содержимое файла совпадает.' : 'Содержимое файла не совпадает.' });
-        } else Object.assign(result, await codeAssessment(task, checker, entry.data, runCode, examDir));
+        } else { decode(entry.data); Object.assign(result, await codeAssessment(task, checker, entry.data, runCode, examDir)); }
       }
     } catch (error) {
       Object.assign(result, { status: 'error', message: error.name === 'UserError' ? error.message : 'Файл ответа недоступен или не удалось выполнить проверку.' });
