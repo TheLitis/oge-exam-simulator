@@ -173,7 +173,7 @@ async function flushMeta(applyCode = false) {
 function getCheckerDraft(taskId = state.editorTask) {
   if (!checkerDrafts.has(taskId)) {
     const task = state.data.editor.tasks.find(t => t.id === taskId), c = task?.checker;
-    checkerDrafts.set(taskId, { mode: c?.type || 'manual', answersText: c?.answers?.join('\n') || '', expected: c?.expected || '', caseSensitive: c?.caseSensitive !== false, ignoreWhitespace: !!c?.ignoreWhitespace, comparison: c?.comparison || 'trim', language: c?.language || 'python', tests: c?.tests?.map(t => ({ ...t })) || [{ input: '', expected: '' }], dirty: false, open: !!c });
+    checkerDrafts.set(taskId, { mode: c?.type || 'manual', answersText: c?.answers?.join('\n') || '', expected: c?.expected || '', caseSensitive: c?.caseSensitive !== false, ignoreWhitespace: !!c?.ignoreWhitespace, comparison: c?.comparison || 'trim', language: c?.language || 'python', tests: c?.tests?.map(t => ({ ...t })) || [{ input: '', expected: '' }], spreadsheetCriteria: c?.type === 'spreadsheet' ? c.criteria.map(item => ({ ...item })) : [V.officeCriterionDefaults('spreadsheet')], presentationCriteria: c?.type === 'presentation' ? c.criteria.map(item => ({ ...item })) : [V.officeCriterionDefaults('presentation')], dirty: false, open: !!c });
   }
   return checkerDrafts.get(taskId);
 }
@@ -181,7 +181,20 @@ function checkerValue(draft) {
   if (draft.mode === 'manual') return null;
   if (draft.mode === 'short') return { type: 'short', answers: draft.answersText.split(/\r?\n/).filter(answer => answer.trim().length), caseSensitive: draft.caseSensitive, ignoreWhitespace: draft.ignoreWhitespace };
   if (draft.mode === 'text') return { type: 'text', expected: draft.expected, comparison: draft.comparison, caseSensitive: draft.caseSensitive };
+  if (['spreadsheet', 'presentation'].includes(draft.mode)) return { type: draft.mode, criteria: draft[`${draft.mode}Criteria`].map(officeCriterionValue) };
   return { type: 'code', language: draft.language, tests: draft.tests.map(test => ({ input: test.input, expected: test.expected })), comparison: draft.comparison };
+}
+function officeNumber(value) { return typeof value === 'string' && !value.trim() ? null : Number(value); }
+function officeCriterionValue(item) {
+  const kind = item.kind, sheet = item.sheet?.trim(), cell = item.cell?.trim().toUpperCase();
+  if (kind === 'cellValue') return { kind, sheet, cell, mode: item.mode, expected: String(item.expected ?? ''), ...(item.mode === 'number' ? { tolerance: officeNumber(item.tolerance ?? 0) } : { caseSensitive: item.caseSensitive !== false }) };
+  if (kind === 'cellFormula') return { kind, sheet, cell, expected: item.expected };
+  if (kind === 'sheetCount' || kind === 'slideCount') return { kind, expected: officeNumber(item.expected) };
+  if (kind === 'sheetExists') return { kind, sheet };
+  if (kind === 'chartCount') return { kind, sheet, minimum: officeNumber(item.minimum) };
+  if (kind === 'slideText') return { kind, slide: officeNumber(item.slide), expected: item.expected, comparison: item.comparison, caseSensitive: item.caseSensitive !== false };
+  if (kind === 'imageCount') return { kind, slide: officeNumber(item.slide), minimum: officeNumber(item.minimum) };
+  return { kind };
 }
 function markCheckerDirty() {
   const draft = getCheckerDraft(); draft.dirty = true; draft.open = true;
@@ -254,7 +267,7 @@ const actions = {
       home: ['Справка', 'Откройте файл .oge или .zip от организатора. Для тренировки доступен демонстрационный вариант с кодом DEMO-2026.\n\nВ редакторе можно создать собственный вариант.'],
       registration: ['Перед началом', 'Таймер начнётся после ввода данных и правильного кода активации. Для демонстрационного варианта: DEMO-2026.\n\nДля тренировки используйте вымышленные данные. Регистрация хранится на этом компьютере и не проверяется по государственным базам.'],
       exam: ['Работа с заданиями', 'В заданиях 1–12 введите краткий ответ. В заданиях 13–16 прикрепите файл. После каждого задания нажимайте «Сохранить» или Ctrl+Enter. Черновики не считаются сданными ответами.\n\nФайлы для работы доступны в заданиях 11–14. После изменения файла прикрепите его заново.\n\nТаймер не останавливается при закрытии окна или перезапуске.'],
-      editor: ['Подготовка варианта', 'Имена изображений: 1.1.png, 1.2.png, 2.1.png и так далее. Импорт из папки распределяет их по номеру задания. Порядок лексикографический: 1.10.png раньше 1.2.png. Для числового порядка используйте 1.01.png, 1.02.png.\n\nВ задания 11–14 добавьте исходные файлы. Установите код активации перед экспортом.\n\nАвтопроверка необязательна. Для краткого ответа добавьте допустимые ответы; для файла выберите текст или программу с тестами. Нажмите «Применить». При переходе к другому заданию, экспорте или проверке изменения также сохраняются.\n\n«Сохранить проект» сохраняет эталоны. «Экспорт экзамена» проверяет все 16 заданий и удаляет эталоны из файла для учеников.'],
+      editor: ['Подготовка варианта', 'Имена изображений: 1.1.png, 1.2.png, 2.1.png и так далее. Импорт из папки распределяет их по номеру задания. Порядок лексикографический: 1.10.png раньше 1.2.png. Для числового порядка используйте 1.01.png, 1.02.png.\n\nВ задания 11–14 добавьте исходные файлы. Установите код активации перед экспортом.\n\nАвтопроверка необязательна. Для краткого ответа добавьте допустимые ответы; для файла выберите текст, программу с тестами, таблицу или презентацию с критериями. Таблицы проверяются по сохранённым значениям и формулам; пересчёт формул не выполняется. Нажмите «Применить». При переходе к другому заданию, экспорте или проверке изменения также сохраняются.\n\n«Сохранить проект» сохраняет эталоны. «Экспорт экзамена» проверяет все 16 заданий и удаляет эталоны из файла для учеников.'],
       review: ['Проверка работы', 'Откройте ZIP с результатами ученика из редактора проекта с эталонами. Проверяются только сданные ответы. Черновики не участвуют в проверке.\n\nПрограммы запускаются в изолированной среде с ограничениями. Недоступность среды или ошибка запуска отображаются отдельно. Задания без эталона проверяются учителем вручную.\n\nОтчёт можно скачать вместе с исходной работой. Итоговая оценка выставляется учителем.'],
       result: ['Результаты', 'Папка и ZIP содержат сохранённые ответы, отдельно черновики и регистрационные данные. Архив не зашифрован: передавайте его только организатору.\n\nЧисло сохранённых ответов не является оценкой. Учитель может проверить работу в редакторе своего проекта.']
     };
@@ -303,6 +316,8 @@ const actions = {
   'checker-apply': async () => { await flushEditor(); render(); toast('Настройки проверки сохранены.'); },
   'checker-add-test': async () => { const draft = getCheckerDraft(); if (draft.tests.length >= 16) return; draft.tests.push({ input: '', expected: '' }); markCheckerDirty(); render(); },
   'checker-remove-test': async el => { const draft = getCheckerDraft(); if (draft.tests.length < 2) return; draft.tests.splice(Number(el.dataset.id), 1); markCheckerDirty(); render(); },
+  'checker-add-criterion': async () => { const draft = getCheckerDraft(), criteria = draft[`${draft.mode}Criteria`]; if (!criteria || criteria.length >= 32) return; criteria.push(V.officeCriterionDefaults(draft.mode)); markCheckerDirty(); render(); },
+  'checker-remove-criterion': async el => { const draft = getCheckerDraft(), criteria = draft[`${draft.mode}Criteria`]; if (!criteria) return; criteria.splice(Number(el.dataset.id), 1); markCheckerDirty(); render(); },
   'generate-code': async () => { await flushEditor(); const v = await request('/api/editor/update', { generateCode: true }); state.data.editor = v.editor; state.editorCode = v.code; render(); toast('Новый код установлен. Сохраните его отдельно и сообщите ученикам.'); },
   'set-code': async () => { await flushEditor(true); render(); toast('Название и код сохранены.'); },
   'import-images': async () => importImageFiles(await pickFiles({ directory: true }), true),
@@ -388,7 +403,10 @@ app.addEventListener('input', e => {
   } else if (e.target.id === 'exam-title') {
     pendingTitle = e.target.value; clearTimeout(metaTimer); metaTimer = setTimeout(() => flushMeta().catch(e => toast(e.message, true)), 700);
   } else if (e.target.id === 'editor-code') state.editorCode = e.target.value;
-  else if (state.mode === 'editor' && e.target.dataset.checkerField && !['enabled', 'mode'].includes(e.target.dataset.checkerField)) {
+  else if (state.mode === 'editor' && e.target.dataset.checkerCriterion !== undefined && !['kind', 'mode'].includes(e.target.dataset.checkerField)) {
+    const draft = getCheckerDraft(), criterion = draft[`${draft.mode}Criteria`][Number(e.target.dataset.checkerCriterion)];
+    criterion[e.target.dataset.checkerField] = e.target.type === 'checkbox' ? e.target.checked : e.target.value; markCheckerDirty();
+  } else if (state.mode === 'editor' && e.target.dataset.checkerCriterion === undefined && e.target.dataset.checkerField && !['enabled', 'mode'].includes(e.target.dataset.checkerField)) {
     const draft = getCheckerDraft(), field = e.target.dataset.checkerField;
     if (e.target.dataset.checkerTest !== undefined) draft.tests[Number(e.target.dataset.checkerTest)][field] = e.target.value;
     else draft[field] = e.target.type === 'checkbox' ? e.target.checked : e.target.value;
@@ -396,7 +414,15 @@ app.addEventListener('input', e => {
   }
 });
 app.addEventListener('change', e => {
-  if (state.mode === 'editor' && ['enabled', 'mode'].includes(e.target.dataset.checkerField)) {
+  if (state.mode === 'editor' && e.target.dataset.checkerCriterion !== undefined && ['kind', 'mode'].includes(e.target.dataset.checkerField)) {
+    const draft = getCheckerDraft(), index = Number(e.target.dataset.checkerCriterion), criteria = draft[`${draft.mode}Criteria`], criterion = criteria[index];
+    if (e.target.dataset.checkerField === 'kind') {
+      const next = V.officeCriterionDefaults(draft.mode, e.target.value);
+      for (const field of ['sheet', 'cell', 'slide']) if (field in next && field in criterion) next[field] = criterion[field];
+      criteria[index] = next;
+    } else { criterion.mode = e.target.value; criterion.caseSensitive ??= true; criterion.tolerance ??= 0; }
+    markCheckerDirty(); render();
+  } else if (state.mode === 'editor' && e.target.dataset.checkerCriterion === undefined && ['enabled', 'mode'].includes(e.target.dataset.checkerField)) {
     const draft = getCheckerDraft(); draft.mode = e.target.dataset.checkerField === 'enabled' ? e.target.checked ? 'short' : 'manual' : e.target.value;
     markCheckerDirty(); render();
   } else if (state.mode === 'editor' && e.target.dataset.checkerField === 'language') render();

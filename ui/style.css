@@ -332,6 +332,14 @@ label { display: flex; flex-direction: column; gap: 8px; min-width: 0; color: va
 .checker-test h3 { font-size: 12px; font-weight: 500; }
 .checker-test .icon-button { width: 30px; min-height: 30px; height: 30px; padding: 6px; }
 .checker-test .icon { width: 15px; height: 15px; }
+.checker-criteria { display: flex; flex-direction: column; gap: 22px; }
+.checker-criterion { display: flex; flex-direction: column; gap: 14px; border-top: 1px solid var(--line); padding-top: 12px; }
+.checker-criterion > .split { margin-bottom: -5px; }
+.checker-criterion h3 { font-size: 12px; font-weight: 500; }
+.checker-criterion .icon-button { width: 30px; min-height: 30px; height: 30px; padding: 6px; }
+.checker-criterion .icon { width: 15px; height: 15px; }
+.checker-criterion .check-option { font-size: 12px; }
+.checker-criterion input[data-checker-field='cell'], .checker-criterion input[data-checker-field='expected'][placeholder] { font-family: ui-monospace, 'DejaVu Sans Mono', monospace; }
 .checker-test textarea, .review-details pre { font: 12px/1.6 ui-monospace, 'DejaVu Sans Mono', monospace; }
 .checker-add-test { width: fit-content; padding-left: 0; margin-top: -9px; font-size: 12px; }
 .checker-add-test .icon { width: 15px; height: 15px; }
@@ -379,6 +387,15 @@ label { display: flex; flex-direction: column; gap: 8px; min-width: 0; color: va
 .review-test { padding: 13px 0; border-bottom: 1px solid var(--line); }
 .review-test:last-child { border-bottom: 0; }
 .review-test > p { margin-top: 8px; font-size: 12px; overflow-wrap: anywhere; }
+.review-criteria > summary > span { margin-left: 8px; font-variant-numeric: tabular-nums; }
+.review-criterion { padding: 16px 0; border-bottom: 1px solid var(--line); }
+.review-criterion:last-child { border-bottom: 0; }
+.review-criterion > .split { align-items: flex-start; gap: 12px; }
+.review-criterion > .split > strong { flex: 1; min-width: 0; font-size: 12px; font-weight: 500; color: var(--ink); overflow-wrap: anywhere; }
+.review-criterion-values { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 14px; margin-top: 12px; }
+.review-criterion-values > div { min-width: 0; }
+.review-criterion-values > div > span { display: block; font-size: 11px; }
+.review-criterion-values pre { margin-top: 6px; max-height: 180px; }
 
 /* Results are a receipt of submitted answers, never a correctness score. */
 .result-page { width: min(824px, 100%); margin: auto; padding: 38px 32px; text-align: center; }
@@ -546,6 +563,7 @@ body[data-busy='true'] button { cursor: wait; }
   .review-candidate { flex-direction: column; align-items: flex-start; gap: 12px; }
   .review-actions > span { width: 100%; margin-left: 0; }
   .review-summary { gap: 18px 28px; }
+  .review-criterion-values { grid-template-columns: 1fr; gap: 10px; }
   .result-page { padding: 28px 20px; }
   .result-card { padding: 22px; }
   .result-tasks { grid-template-columns: repeat(8, minmax(0, 1fr)); }
