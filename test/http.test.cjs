@@ -4,7 +4,8 @@ const assert=require('node:assert/strict');
 const os=require('node:os');
 const {pathToFileURL,fileURLToPath}=require('node:url');
 const {fsp,path,JSZip,UserError}=require('../src/io.cjs');
-const {startServer,openBrowser}=require('../src/server.cjs');
+const {startServer,openBrowser}=require('./helpers/legacy-service.cjs');
+const {decryptBuffer}=require('../src/result-protection.cjs');
 const PERSON={registration:'00012345',surname:'Тестовый',name:'Ученик',passportSeries:'0000',passportNumber:'000000'};
 const TEACHER_PASSWORD='HTTP teacher test password';
 async function server(t,options={}) {
@@ -25,6 +26,12 @@ async function teacher(post) {
 async function state(app,headers) {
   const res=await fetch(app.url+'/api/state',{headers});assert.equal(res.status,200);
   return (await res.json()).value;
+}
+function assertTeacherState(value,configured,unlocked) {
+  assert.equal(value.configured,configured);assert.equal(value.unlocked,unlocked);
+  assert.equal(value.resultProtection.ready,configured);
+  if(configured)assert.match(value.resultProtection.keyId,/^[a-f0-9]{64}$/);
+  else assert.equal(value.resultProtection.keyId,null);
 }
 function noTeacherRefs(value) {
   for(const exam of [value.editor,value.exam]) if(exam) {
@@ -136,7 +143,7 @@ test('API does not expose filesystem paths or unpublished internal data',async t
 test('teacher capabilities are per request, require the main bearer and cannot reset an existing password',async t=>{
   let offset=0;
   const {app,headers,post}=await server(t,{clock:{now:()=>Date.now()+offset,monotonic:()=>offset}});
-  assert.deepEqual((await state(app,headers)).teacher,{configured:false,unlocked:false});
+  assertTeacherState((await state(app,headers)).teacher,false,false);
   const unauth=await fetch(app.url+'/api/teacher/setup',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({password:TEACHER_PASSWORD})});
   assert.equal(unauth.status,401);assert.equal(app.service.teacherConfigured(),false);
   const crossSite=await post('/api/teacher/setup',{password:TEACHER_PASSWORD},{Origin:'https://evil.example'});
@@ -150,7 +157,7 @@ test('teacher capabilities are per request, require the main bearer and cannot r
   for(const visitor of [headers,{...headers,'X-Teacher-Token':'a'.repeat(64)}]) {
     const view=await state(app,visitor);noTeacherRefs(view);
     assert.equal(JSON.stringify(view).includes('HIDDEN-TEACHER-ANSWER'),false);
-    assert.deepEqual(view.teacher,{configured:true,unlocked:false});
+    assertTeacherState(view.teacher,true,false);
   }
   const routes=['/api/editor/new','/api/editor/update','/api/editor/checker','/api/editor/remove','/api/editor/export','/api/review/check','/api/teacher/lock'];
   for(const route of routes) assert.equal((await post(route)).status,403,route);
@@ -282,13 +289,16 @@ test('shared-PC pupil flow locks the teacher, hides private assets and retains a
   assert.equal((await post('/api/save',{id:16})).status,200);
   assert.equal((await post('/api/finish',{confirm:true})).status,200);
   const result=await fetch(app.url+'/api/result',{headers});assert.equal(result.status,200);
-  const resultBytes=Buffer.from(await result.arrayBuffer()),resultZip=await JSZip.loadAsync(resultBytes);
-  assert.equal(await resultZip.file('files/task-16/answer.py').async('string'),'print(42)');
+  const resultBytes=Buffer.from(await result.arrayBuffer());
+  assert.equal(resultBytes.includes(Buffer.from('print(42)')),false);
+  await assert.rejects(JSZip.loadAsync(resultBytes));
   assert.equal((await fetch(app.url+'/api/asset?id='+task.body.value.resources[0].id,{headers})).status,403);
   const dismissed=await post('/api/dismiss');assert.equal(dismissed.status,200);noTeacherRefs(dismissed.body.value);
   const unlocked=await post('/api/teacher/unlock',{password:TEACHER_PASSWORD});assert.equal(unlocked.status,200);
   const reviewCapability={'X-Teacher-Token':unlocked.body.value.token},reviewHeaders={...headers,...reviewCapability};
-  const reviewUpload=await fetch(app.url+'/api/upload?kind=review&name=results.zip',{method:'POST',headers:reviewHeaders,body:resultBytes});
+  const resultZip=await JSZip.loadAsync(decryptBuffer(resultBytes,app.service.teacher.resultPrivateKeys(),{purpose:'results'}));
+  assert.equal(await resultZip.file('files/task-16/answer.py').async('string'),'print(42)');
+  const reviewUpload=await fetch(app.url+'/api/upload?kind=review&name=results.ogeresult',{method:'POST',headers:reviewHeaders,body:resultBytes});
   assert.equal(reviewUpload.status,200);const review=(await reviewUpload.json()).value;
   const checked=await post('/api/review/check',{id:review.id,allowUnmatched:true},reviewCapability);
   assert.equal(checked.status,200);assert.equal(checked.body.value.tasks[0].status,'correct');
@@ -308,7 +318,7 @@ test('shared-PC pupil flow locks the teacher, hides private assets and retains a
   try {
     const visitor={Authorization:`Bearer ${restarted.key}`,'X-Teacher-Token':reviewCapability['X-Teacher-Token']};
     const afterRestart=await state(restarted,visitor);noTeacherRefs(afterRestart);
-    assert.deepEqual(afterRestart.teacher,{configured:true,unlocked:false});
+    assertTeacherState(afterRestart.teacher,true,false);
     assert.equal((await fetch(restarted.url+'/api/review/report?id='+review.id,{headers:visitor})).status,403);
     assert.equal((await fetch(restarted.url+'/api/package?id='+published.body.value.id,{headers:visitor})).status,403);
     const setupAgain=await fetch(restarted.url+'/api/teacher/setup',{method:'POST',headers:{...visitor,'Content-Type':'application/json'},body:JSON.stringify({password:'A replacement password'})});
@@ -324,7 +334,7 @@ test('a pupil with only a published file needs no teacher setup to complete the 
   const {app,headers,post}=await server(t),bytes=await fsp.readFile(path.join(__dirname,'../examples/demo.oge'));
   const imported=await fetch(app.url+'/api/upload?kind=package&name=exam.oge',{method:'POST',headers,body:bytes});
   assert.equal(imported.status,200);await imported.json();
-  assert.deepEqual((await state(app,headers)).teacher,{configured:false,unlocked:false});
+  assertTeacherState((await state(app,headers)).teacher,false,false);
   noTeacherRefs(await state(app,headers));
   assert.equal((await post('/api/demo',{edit:true})).status,403);
   assert.equal((await post('/api/start',{candidate:PERSON,code:'DEMO-2026'})).status,200);
@@ -493,22 +503,25 @@ test('server finishes on its own without browser polling',async t=>{
   assert.equal(app.service.attempt.status,'finished');assert.equal(app.service.attempt.finishReason,'timeout');assert.ok(app.service.attempt.archivePath);
 });
 
-test('only teachers open all results; pupils retain access to their own finished folder',async t=>{
+test('authenticated pupils can open results folders without teacher login and cannot choose arbitrary paths',async t=>{
   const opened=[]; let fail=false;
   const {app,post}=await server(t,{folderLauncher:async folder=>{
     if(fail)throw new UserError('Synthetic file-manager failure.',503);opened.push(folder);
   }});
-  assert.equal((await post('/api/open-folder',{root:true})).status,403);
-  assert.equal((await post('/api/open-folder',{})).status,403);assert.equal(opened.length,0);
+  assert.equal((await fetch(app.url+'/api/open-folder',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'})).status,401);
+  assert.equal(opened.length,0);
+  assert.equal((await post('/api/open-folder',{root:true})).status,200);
+  assert.equal((await post('/api/open-folder',{})).status,200);
+  assert.deepEqual(opened,[app.service.resultsRoot,app.service.resultsRoot]);
   const capability=await teacher(post);
   assert.equal((await post('/api/open-folder',{root:true,path:'/arbitrary/untrusted/path'},capability)).status,200);
-  assert.deepEqual(opened,[app.service.resultsRoot]);
+  assert.deepEqual(opened,[app.service.resultsRoot,app.service.resultsRoot,app.service.resultsRoot]);
   fail=true;assert.equal((await post('/api/open-folder',{root:true},capability)).status,503);fail=false;
   assert.equal((await post('/api/demo')).status,200);
   assert.equal((await post('/api/start',{candidate:PERSON,code:'DEMO-2026'})).status,200);
-  assert.equal((await post('/api/open-folder',{})).status,403);
+  assert.equal((await post('/api/open-folder',{})).status,200);assert.equal(opened.at(-1),app.service.resultsRoot);
   assert.equal((await post('/api/finish',{confirm:true})).status,200);
-  assert.equal((await post('/api/open-folder',{root:true})).status,403);
+  assert.equal((await post('/api/open-folder',{root:true})).status,200);assert.equal(opened.at(-1),app.service.resultsRoot);
   assert.equal((await post('/api/open-folder',{path:'/arbitrary/untrusted/path'})).status,200);
   assert.equal(opened.at(-1),app.service.attempt.resultDir);
 });

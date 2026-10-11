@@ -3,6 +3,7 @@ const { promisify } = require('node:util');
 const { fsp, path, crypto, check, safeName, safeRelative, inside, hashFile, rasterMime, LIMITS } = require('./io.cjs');
 const scrypt = promisify(crypto.scrypt);
 const { validateChecker } = require('./grading.cjs');
+const { validateRecipient } = require('./result-protection.cjs');
 const DURATION = 9000;
 const IMAGE_NAME = /^(\d{1,2})\.(\d+)\.(png|jpe?g|gif|webp|bmp)$/i;
 const lexical = (a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0;
@@ -41,6 +42,7 @@ function validateShape(exam, requirePublished = false) {
   check(typeof exam.title === 'string' && exam.title.trim().length > 0 && exam.title.length <= 160, 'Название экзамена должно содержать от 1 до 160 символов.');
   check(exam.durationSeconds === DURATION, 'Продолжительность экзамена должна быть ровно 150 минут.');
   check(typeof exam.published === 'boolean', 'Некорректное состояние экзамена.');
+  if(exam.resultRecipient!==undefined)validateRecipient(exam.resultRecipient);
   if (requirePublished) check(exam.published, 'Это проект, а не опубликованный экзамен. Откройте его в редакторе и экспортируйте экзамен.');
   if (exam.activation !== null) {
     const a = exam.activation;

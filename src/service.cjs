@@ -7,6 +7,8 @@ const { version } = require('../package.json');
 const G = require('./grading.cjs');
 const CodeRunner = require('./code-runner.cjs');
 const R = require('./review.cjs');
+const ResultProtection = require('./result-protection.cjs');
+const ResultStorage = require('./result-storage.cjs');
 const { TeacherProtection, publicEditor, isProtectedProject, readLegacyPackage } = require('./teacher.cjs');
 const clone = value => structuredClone(value);
 const iso = ms => new Date(ms).toISOString();
@@ -14,13 +16,16 @@ const html = value => String(value ?? '').replace(/[&<>"']/g, c => ({ '&':'&amp;
 const csv = value => '"' + String(value ?? '').replace(/^[=+@\-\t\r]/, x => "'" + x).replace(/"/g, '""') + '"';
 
 class ExamService {
-  constructor(root, { now = Date.now, monotonic = () => performance.now(), resultsRoot, codeRunner = CodeRunner } = {}) {
+  constructor(root, { now = Date.now, monotonic = () => performance.now(), resultsRoot, codeRunner = CodeRunner, allowLegacyResults = false } = {}) {
     this.root = path.resolve(root); this.now = now; this.monotonic = monotonic;
     this.resultsRoot = path.resolve(resultsRoot || this.dir('results'));
     this.config = {}; this.editor = null; this.exam = null; this.attempt = null;
     this.lastCheckpoint = 0; this.nextActivationAt = 0; this.badCodes = 0;
     this.lastError = null; this.recovered = false;
     this.codeRunner = codeRunner; this.checking = null;
+    // Historical fixtures and migration can still read the original ZIP format.
+    // The desktop HTTP entry point never enables unprotected new attempts.
+    this.allowLegacyResults = allowLegacyResults;
     this.teacherTemporaries = new Set();
     this.teacher = new TeacherProtection(this.dir('teacher'), { monotonic: this.monotonic, onLock: () => {
       this.editor = publicEditor(this.editor); this.clearTeacherTemporaries();
@@ -49,7 +54,7 @@ class ExamService {
       await this.writePublicEditor(this.editor, backupEditor);
       if (this.config.teacherProtection !== 1) await this.persistConfig({ teacherProtection: 1 });
     } else if (!editorValid) await this.persistEditor(this.editor);
-    await this.migrateResults();
+    if(this.allowLegacyResults)await this.migrateResults();
     if (/^[a-f0-9-]{36}$/.test(this.config.examId ?? '')) {
       try {
         this.examDir = this.dir('exams', this.config.examId);
@@ -60,6 +65,16 @@ class ExamService {
     for (const id of await fsp.readdir(this.dir('sessions'))) {
       if (!/^[a-f0-9-]{36}$/.test(id)) continue;
       try {
+        let receipt;
+        try { receipt = await ResultStorage.readReceipt(this.dir('sessions',id),id); }
+        catch(e) { if(e.code !== 'ENOENT')throw e; }
+        if(receipt) {
+          await ResultStorage.cleanupSession(this.dir('sessions',id));
+          try {receipt=await ResultStorage.publishReceipt(receipt,this.dir('sessions',id),this.resultsRoot);}
+          catch {receipt.archivePath=null;receipt.resultDir=null;receipt.exportError='Не удалось восстановить файл в папке результатов. Зашифрованная резервная копия сохранена.';this.lastError=receipt.exportError;await json(this.dir('sessions',id,'receipt.json'),receipt);}
+          if(receipt.id===this.config.attemptId)candidates.push(receipt);
+          continue;
+        }
         const a = await readJson(this.dir('sessions', id, 'session.json'), true);
         check(a.schema === 1 && a.id === id && Number.isFinite(a.startedAt) && a.durationSeconds === M.DURATION && ['active','finished'].includes(a.status), 'Повреждён сеанс.');
         if (a.status === 'active' || a.id === this.config.attemptId) candidates.push(a);
@@ -67,8 +82,11 @@ class ExamService {
     }
     candidates.sort((a, b) => (b.status === 'active') - (a.status === 'active') || b.startedAt - a.startedAt);
     if (candidates.length) {
-      this.attempt = candidates[0]; this.sessionExam = await readJson(this.dir('sessions', this.attempt.id, 'exam/manifest.json'));
-      await M.validateFiles(this.sessionExam, this.dir('sessions', this.attempt.id, 'exam'), true);
+      this.attempt = candidates[0];
+      if(!this.attempt.sealed) {
+        this.sessionExam = await readJson(this.dir('sessions', this.attempt.id, 'exam/manifest.json'));
+        await M.validateFiles(this.sessionExam, this.dir('sessions', this.attempt.id, 'exam'), true);
+      }
       if (this.config.attemptId !== this.attempt.id) await this.persistConfig({ attemptId: this.attempt.id });
       this.setAnchor(); this.recovered = this.attempt.status === 'active';
       if (this.attempt.status === 'active') await this.pulse(true);
@@ -88,6 +106,7 @@ class ExamService {
   remaining() { return this.attempt ? Math.max(0, this.attempt.durationSeconds * 1000 - this.elapsed()) : 0; }
   async commit(mutator) {
     const next = clone(this.attempt); mutator(next);
+    if(next.sealed) { await json(this.dir('sessions',next.id,'receipt.json'),next); this.attempt=next; return; }
     next.elapsedFloorMs = Math.max(next.elapsedFloorMs || 0, this.elapsed());
     next.observedAt = Math.max(next.observedAt || 0, this.now());
     await json(this.dir('sessions', next.id, 'session.json'), next, true); this.attempt = next;
@@ -180,6 +199,7 @@ class ExamService {
     try {
       const result = await this.teacher.configure(password, editor, { backupEditor, legacyBackup }); this.editor = editor;
       await this.protectStoredTeacherFiles(); await this.writePublicEditor(editor, backupEditor);
+      await this.protectStoredResults();
       await this.persistConfig({ teacherProtection: 1, teacherFilesProtected: 1 }); return result;
     } catch (e) {
       if (this.teacherConfigured()) {
@@ -196,11 +216,102 @@ class ExamService {
       if (this.config.teacherFilesProtected !== 1) {
         await this.protectStoredTeacherFiles(); await this.persistConfig({ teacherFilesProtected: 1 });
       }
+      await this.protectStoredResults();
       return { token };
     } catch (e) { if(established)this.teacher.lock(); throw e; }
   }
   async lockTeacher() { this.teacher.lock(); this.clearTeacherTemporaries(); return this.state(); }
   async persistConfig(patch) { const next = { ...this.config, ...patch }; await json(this.dir('config.json'), next, true); this.config = next; }
+  ownsResultPath(file) {
+    if(typeof file!=='string' || !path.isAbsolute(file))return false;
+    return [this.resultsRoot,this.dir('results')].some(root=>{const rel=path.relative(root,file);return rel && rel!=='..' && !rel.startsWith('..'+path.sep) && !path.isAbsolute(rel);});
+  }
+  async validateStoredResult(file) {
+    const workspace=this.dir('teacher/runtime',`workspace-${crypto.randomUUID()}`);this.teacherTemporaries.add(workspace);
+    try {await mkdir(workspace);return await R.importResult(file,workspace,this.editor);}
+    finally {await fsp.rm(workspace,{recursive:true,force:true});this.teacherTemporaries.delete(workspace);}
+  }
+  async verifyEncryptedCopy(file,sourceHash) {
+    const workspace=this.dir('teacher/runtime',`workspace-${crypto.randomUUID()}`);this.teacherTemporaries.add(workspace);
+    try {await mkdir(workspace);const restored=path.join(workspace,'verify.zip');await ResultProtection.decryptFile(file,restored,this.teacher.resultPrivateKeys());check(await hashFile(restored)===sourceHash,'Зашифрованная копия отличается от исходной работы. Оригинал сохранён.');}
+    finally {await fsp.rm(workspace,{recursive:true,force:true});this.teacherTemporaries.delete(workspace);}
+  }
+  async protectStoredResults() {
+    this.assertTeacherUnlocked(); const recipient=this.teacher.resultRecipient();if(!recipient)return;
+    let pending=false;
+    // Old imported answers and source ZIPs need protection as well as reports.
+    for(const id of await fsp.readdir(this.dir('reviews'))) {
+      if(!/^[a-f0-9-]{36}$/.test(id))continue;
+      await this.storeReviewDirectory(this.dir('reviews',id),this.dir('reviews',id));
+    }
+    for(const id of await fsp.readdir(this.dir('sessions'))) {
+      if(!/^[a-f0-9-]{36}$/.test(id))continue;
+      const dir=this.dir('sessions',id);
+      let receipt;
+      try {receipt=await ResultStorage.readReceipt(dir,id);}catch(e){if(e.code!=='ENOENT'){pending=true;continue;}}
+      if(receipt){await ResultStorage.cleanupSession(dir);continue;}
+      let a;
+      try {a=await readJson(path.join(dir,'session.json'),true);}catch(e){if(e.code!=='ENOENT')pending=true;continue;}
+      if(a.status!=='finished')continue;
+      try {
+        let sourceZip;
+        if(this.ownsResultPath(a.archivePath) && fs.existsSync(a.archivePath) && a.archivePath.endsWith('.zip')) {
+          const original=await this.validateStoredResult(a.archivePath);check(original.sessionId===a.id,'Архив не соответствует сеансу.');sourceZip=a.archivePath;
+        }
+        const exam=await readJson(path.join(dir,'exam/manifest.json'));
+        receipt=await ResultStorage.sealSession(a,exam,dir,recipient,{sourceZip});
+        try {receipt=await ResultStorage.publishReceipt(receipt,dir,this.resultsRoot);}catch(e){receipt.exportError='Не удалось сохранить работу в Документы. Зашифрованная резервная копия сохранена.';await json(path.join(dir,'receipt.json'),receipt);pending=true;}
+        if(this.attempt?.id===id){this.attempt=receipt;this.sessionExam=null;}
+      }catch {pending=true;}
+    }
+    // Only app-format OGE_*.zip files inside explicitly configured result roots
+    // are migrated. Unrelated user archives are never selected for removal.
+    for(const root of new Set([this.resultsRoot,this.dir('results')])) {
+      let entries;try {entries=await fsp.readdir(root,{withFileTypes:true});}catch(e){if(e.code!=='ENOENT')pending=true;continue;}
+      for(const entry of entries) {
+        if(!entry.isFile() || !/^OGE_.+\.zip$/.test(entry.name))continue;
+        const source=path.join(root,entry.name);
+        try {
+          const original=await this.validateStoredResult(source), hash=await hashFile(source);
+          const encrypted=path.join(root,`OGE_protected_${original.sessionId}_${hash.slice(0,12)}.ogeresult`);
+          if(!fs.existsSync(encrypted))await ResultProtection.encryptFile(source,encrypted,recipient);
+          await this.verifyEncryptedCopy(encrypted,hash);
+          const folder=source.slice(0,-4);
+          if(!await ResultStorage.removeMatchingFolder(folder,source)){pending=true;continue;}
+          await fsp.unlink(source);
+        } catch {pending=true;}
+      }
+      for(const entry of entries) {
+        if(!entry.isDirectory() || !entry.name.startsWith('OGE_') || entry.name.endsWith('.tmp'))continue;
+        const folder=path.join(root,entry.name);
+        if(fs.existsSync(folder+'.zip') || fs.existsSync(path.join(folder,'result.ogeresult')) || !fs.existsSync(path.join(folder,'answers.json')))continue;
+        const encrypted=path.join(root,`OGE_migrated_${crypto.randomUUID()}.ogeresult`);
+        try {
+          await ResultProtection.encryptStream(ResultStorage.zipStream(await ResultStorage.legacyFolderEntries(folder)),encrypted,recipient);
+          const workspace=this.dir('teacher/runtime',`workspace-${crypto.randomUUID()}`);this.teacherTemporaries.add(workspace);
+          try {
+            await mkdir(workspace);const plain=path.join(workspace,'work.zip');await ResultProtection.decryptFile(encrypted,plain,this.teacher.resultPrivateKeys());
+            await this.validateStoredResult(plain);check(await ResultStorage.removeMatchingFolder(folder,plain),'Прежняя папка содержит другие файлы. Оригинал сохранён.');
+          }finally {await fsp.rm(workspace,{recursive:true,force:true});this.teacherTemporaries.delete(workspace);}
+        }catch {pending=true;await fsp.rm(encrypted,{force:true}).catch(()=>{});}
+      }
+    }
+    await this.persistConfig({resultsProtection:pending?0:1});
+    if(pending)this.lastError='Некоторые прежние файлы не удалось защитить. Они сохранены. Проверьте доступ и повторно войдите как учитель.';
+  }
+  resultKeyBackup() {this.assertIdle();this.assertTeacherUnlocked();return this.teacher.exportResultKeyBackup();}
+  async importResultKey(file,password) {this.assertIdle();this.assertTeacherUnlocked();return this.teacher.importResultKeyBackup(file,password);}
+  async resultDownload() {
+    const a=this.attempt;check(a?.status==='finished' && a.archivePath,'Итоговая работа пока недоступна. Повторите экспорт.');
+    if(a.sealed) {
+      const receipt=await ResultStorage.readReceipt(this.attemptDir(),a.id);
+      const expected=ResultStorage.visibleArchive(receipt,this.resultsRoot);
+      const st=await fsp.lstat(expected);
+      check(a.archivePath===expected && st.isFile() && !st.isSymbolicLink() && st.size<=ResultProtection.RESULT_LIMIT && await hashFile(expected)===receipt.archiveSha256,
+        'Файл результатов изменён или повреждён. Повторите экспорт из зашифрованной резервной копии.');
+    }
+    return {file:a.archivePath,encrypted:!!a.sealed};
+  }
   async migrateResults() {
     if (this.resultsRoot === this.dir('results')) return;
     try {
@@ -235,7 +346,7 @@ class ExamService {
   publicExam(exam, includeCheckers = false) {
     if (!exam) return null;
     return { id: exam.id, title: exam.title, published: exam.published, durationSeconds: M.DURATION,
-      hasActivation: !!(exam.activation || exam.teacherHasActivation),
+      hasActivation: !!(exam.activation || exam.teacherHasActivation), resultsProtected:!!(exam.resultRecipient || this.teacher.resultRecipient()),
       tasks: exam.tasks.map(t => ({ id: t.id, kind: M.taskKind(t.id), hasResources: M.hasResources(t.id), requiresResources: M.requiresResources(t.id),
         images: [...t.images].sort(M.lexical).map(({ id, name, size }) => ({ id, name, size })),
         resources: t.resources.map(({ id, name, size }) => ({ id, name, size })),
@@ -243,19 +354,20 @@ class ExamService {
   }
   sessionView() {
     const a = this.attempt; if (!a) return null;
-    const statuses = Array.from({ length: 16 }, (_, i) => ({ id: i + 1, saved: M.answered(a.answers[i+1]), dirty: M.dirty(a, i+1) }));
+    const statuses = a.sealed ? a.statuses : Array.from({ length: 16 }, (_, i) => ({ id: i + 1, saved: M.answered(a.answers[i+1]), dirty: M.dirty(a, i+1) }));
     return { id: a.id, status: a.status, title: a.title, startedAt: a.startedAt, deadlineAt: a.deadlineAt, finishedAt: a.finishedAt,
       finishReason: a.finishReason, remainingMs: this.remaining(), currentTask: a.currentTask,
-      candidate: { surname: a.candidate.surname, name: a.candidate.name, registration: a.candidate.registration },
+      candidate: { surname: a.candidate?.surname || '', name: a.candidate?.name || '', registration: a.candidate?.registration || '' },
       statuses, savedCount: statuses.filter(s => s.saved).length, dirtyCount: statuses.filter(s => s.dirty).length,
-      resultDir: a.resultDir || null, archiveReady: !!a.archivePath, exportError: a.exportError || null, recovered: this.recovered };
+      resultDir: a.resultDir || null, archiveReady: !!a.archivePath, archiveName:a.archivePath?path.basename(a.archivePath):null,
+      encrypted:!!a.sealed, exportError: a.exportError || null, recovered: this.recovered };
   }
   state({ teacherAccess = false } = {}) {
     const idle = this.attempt?.status !== 'active', allowed = !!teacherAccess && (!this.teacherConfigured() || this.teacher.unlocked()) && idle;
     // Expiry also discards the decrypted editor when the caller is a pupil.
     this.teacher.unlocked();
     return { version, theme: this.theme(), exam: this.publicExam(this.exam), editor: idle ? this.publicExam(this.editor, allowed) : null,
-      teacher: { configured: this.teacherConfigured(), unlocked: allowed }, session: this.sessionView(), checking:this.checking, resultsRoot:this.resultsRoot, warning:this.lastError };
+      teacher: { configured: this.teacherConfigured(), unlocked: allowed, resultProtection:{ready:!!this.teacher.resultRecipient(),keyId:this.teacher.resultRecipient()?.keyId || null,migrationPending:this.teacherConfigured() && this.config.resultsProtection!==1} }, session: this.sessionView(), checking:this.checking, resultsRoot:this.resultsRoot, warning:this.lastError };
   }
   async newEditor() { this.assertIdle(); this.assertTeacherUnlocked(); await this.persistEditor(M.blankExam()); return this.publicExam(this.editor, true); }
   async setEditorChecker({taskId, checker} = {}) {
@@ -272,38 +384,88 @@ class ExamService {
     this.assertTeacherUnlocked(); return result;
   }
   async importReview(file) {
-    this.assertIdle(); this.assertTeacherUnlocked(); return R.reviewView(await R.importResult(file, this.dir('reviews'), this.editor));
+    this.assertIdle(); this.assertTeacherUnlocked();
+    if(!this.teacherConfigured())return R.reviewView(await R.importResult(file,this.dir('reviews'),this.editor));
+    const workspace=this.dir('teacher/runtime',`workspace-${crypto.randomUUID()}`);this.teacherTemporaries.add(workspace);
+    let record;
+    try {
+      await mkdir(workspace); let source=file;
+      if(await ResultProtection.isEncryptedResult(file)) {
+        source=path.join(workspace,'result.zip');
+        await ResultProtection.decryptFile(file,source,this.teacher.resultPrivateKeys());
+      }
+      record=await R.importResult(source,path.join(workspace,'imported'),this.editor);
+      record.sourceEncrypted=source!==file;
+      await json(path.join(workspace,'imported',record.id,'review.json'),record);
+      await this.storeReviewDirectory(path.join(workspace,'imported',record.id),this.dir('reviews',record.id));
+      return R.reviewView(record);
+    } catch(e) {
+      if(record)await fsp.rm(this.dir('reviews',record.id),{recursive:true,force:true});throw e;
+    } finally {await fsp.rm(workspace,{recursive:true,force:true});this.teacherTemporaries.delete(workspace);}
+  }
+  async storeReviewDirectory(source,target) {
+    this.assertTeacherUnlocked(); await mkdir(target);
+    for(const entry of await fsp.readdir(source,{withFileTypes:true})) {
+      check(!entry.isSymbolicLink(),'Недопустимая ссылка в проверяемой работе.');
+      const file=path.join(source,entry.name), out=path.join(target,entry.name);
+      if(entry.isDirectory()){check(entry.name==='blobs','Неизвестная папка работы.');await this.storeReviewDirectory(file,out);}
+      else {check(entry.isFile(),'Недопустимый файл работы.');if(file===out && await isProtectedProject(file))continue;await this.teacher.protectProject(file,out);}
+    }
+  }
+  async reviewWorkspace(id,fn) {
+    check(typeof id==='string' && /^[a-f0-9-]{36}$/.test(id),'Некорректный идентификатор работы.');
+    this.assertIdle();this.assertTeacherUnlocked();
+    if(!this.teacherConfigured())return fn(this.dir('reviews',id));
+    const workspace=this.dir('teacher/runtime',`workspace-${crypto.randomUUID()}`);this.teacherTemporaries.add(workspace);
+    const source=this.dir('reviews',id);
+    try {
+      await mkdir(workspace);
+      async function restore(service,from,to) {
+        for(const entry of await fsp.readdir(from,{withFileTypes:true})) {
+          check(!entry.isSymbolicLink(),'Недопустимая ссылка в проверяемой работе.');
+          const file=path.join(from,entry.name),out=path.join(to,entry.name);
+          if(entry.isDirectory()){check(entry.name==='blobs','Неизвестная папка работы.');await mkdir(out);await restore(service,file,out);}
+          else if(entry.name==='review.json' || entry.name==='original-results.zip' || /^[a-f0-9-]{36}$/.test(entry.name)) {
+            check(entry.isFile(),'Недопустимый файл работы.');
+            if(await isProtectedProject(file))await service.teacher.openProject(file,out);
+            else await fsp.copyFile(file,out);
+          }
+        }
+      }
+      await restore(this,source,workspace);return await fn(workspace);
+    } finally {await fsp.rm(workspace,{recursive:true,force:true});this.teacherTemporaries.delete(workspace);}
   }
   async loadReview(id) {
     this.assertIdle(); this.assertTeacherUnlocked(); check(typeof id==='string' && /^[a-f0-9-]{36}$/.test(id), 'Некорректный идентификатор работы.');
-    const record=await readJson(this.dir('reviews',id,'review.json')); check(record.id===id && record.attempt?.answers, 'Работа повреждена. Откройте ZIP повторно.');
+    const record=await this.reviewWorkspace(id,dir=>readJson(path.join(dir,'review.json'))); check(record.id===id && record.attempt?.answers, 'Работа повреждена. Откройте работу повторно.');
     record.contextMatch=record.context?R.contextMatches(record.context,this.editor):null; return record;
   }
   async checkReview({id, allowUnmatched=false} = {}) {
     check(typeof allowUnmatched==='boolean', 'Некорректное подтверждение варианта.');
     const record=await this.loadReview(id);
     check(record.contextMatch===true || allowUnmatched, 'Сопоставьте вариант с проектом и подтвердите использование эталонов.');
-    const assessment=await G.assessExam({exam:clone(this.editor),attempt:record.attempt,attemptDir:this.dir('reviews',id),examDir:this.dir('editor'),runCode:options=>this.codeRunner.runCode(options)});
-    assessment.projectSha256=crypto.createHash('sha256').update(JSON.stringify(this.editor)).digest('hex');
-    if (this.teacherConfigured()) {
-      const dir=this.dir('teacher/runtime',`workspace-${crypto.randomUUID()}`); this.teacherTemporaries.add(dir);
-      try {
-        await mkdir(dir); await fsp.copyFile(this.dir('reviews',id,'original-results.zip'),path.join(dir,'original-results.zip'));
-        await R.writeReviewReport(record,assessment,dir);
-        for (const name of ['assessment.json','assessment.html','assessment.csv','SHA256.json','reviewed-results.zip'])
-          await this.teacher.protectProject(path.join(dir,name),this.dir('reviews',id,name));
-      } finally { await fsp.rm(dir,{recursive:true,force:true}); this.teacherTemporaries.delete(dir); }
-    } else await R.writeReviewReport(record,assessment,this.dir('reviews',id));
-    await json(this.dir('reviews',id,'review.json'),record); return assessment;
+    const assessment=await this.reviewWorkspace(id,async dir=>{
+      const grade=await G.assessExam({exam:clone(this.editor),attempt:record.attempt,attemptDir:dir,examDir:this.dir('editor'),runCode:options=>this.codeRunner.runCode(options)});
+      grade.projectSha256=crypto.createHash('sha256').update(JSON.stringify(this.editor)).digest('hex');
+      this.assertTeacherUnlocked();
+      if(this.teacherConfigured()) {
+        await R.writeReviewReport(record,grade,dir);
+        await json(path.join(dir,'review.json'),record);
+        await this.storeReviewDirectory(dir,this.dir('reviews',id));
+      } else await R.writeReviewReport(record,grade,dir);
+      return grade;
+    });
+    if(!this.teacherConfigured())await json(this.dir('reviews',id,'review.json'),record); return assessment;
   }
   async reviewReport(id) {
     await this.loadReview(id); const file=this.dir('reviews',id,'reviewed-results.zip');
     check(fs.existsSync(file), 'Сначала проверьте работу.');
     if (!this.teacherConfigured()) return file;
-    const temporary=this.dir('teacher/runtime',`report-${crypto.randomUUID()}.zip`); this.teacherTemporaries.add(temporary);
-    try { await this.teacher.openProject(file,temporary); }
-    catch (e) { this.teacherTemporaries.delete(temporary); throw e; }
-    return { file:temporary, cleanup:async()=>{await fsp.rm(temporary,{force:true});this.teacherTemporaries.delete(temporary);} };
+    const workspace=this.dir('teacher/runtime',`workspace-${crypto.randomUUID()}`);this.teacherTemporaries.add(workspace);
+    const temporary=path.join(workspace,'report.zip');
+    try { await mkdir(workspace);await this.teacher.openProject(file,temporary); }
+    catch (e) { await fsp.rm(workspace,{recursive:true,force:true});this.teacherTemporaries.delete(workspace); throw e; }
+    return { file:temporary, cleanup:async()=>{await fsp.rm(workspace,{recursive:true,force:true});this.teacherTemporaries.delete(workspace);} };
   }
   async updateEditor({ title, code, generateCode = false } = {}) {
     this.assertIdle(); this.assertTeacherUnlocked(); const next = clone(this.editor); next.published = false;
@@ -348,6 +510,11 @@ class ExamService {
   async exportExam(publish = true) {
     this.assertIdle(); this.assertTeacherUnlocked(); check(typeof publish === 'boolean', 'Некорректное состояние публикации.');
     const next = clone(this.editor); next.id = crypto.randomUUID(); next.published = publish;
+    if(publish) {
+      const recipient=this.teacher.resultRecipient();
+      check(recipient || this.allowLegacyResults, 'Сначала задайте пароль учителя и сохраните резервную копию ключа результатов.');
+      if(recipient)next.resultRecipient=recipient;
+    }
     if (publish) for (const task of next.tasks) delete task.checker;
     await M.validateFiles(next, this.dir('editor'), publish);
     const out = this.dir('exports', `${next.id}.oge`);
@@ -388,6 +555,8 @@ class ExamService {
   }
   async start(input, code) {
     this.assertIdle(); check(this.exam, 'Сначала загрузите экзамен.'); M.validateShape(this.exam, true);
+    check(this.exam.resultRecipient || this.teacher.resultRecipient() || this.allowLegacyResults,
+      'В экзамене нет ключа результатов. Попросите учителя опубликовать вариант заново или настроить защиту на этом компьютере.');
     check(this.now() >= this.nextActivationAt, 'Подождите несколько секунд перед следующей попыткой ввода кода.');
     const person = M.candidate(input);
     if (!await M.verifyCode(code, this.exam.activation)) {
@@ -407,7 +576,7 @@ class ExamService {
     await this.persistConfig({ attemptId: id }); return this.sessionView();
   }
   task(id) {
-    M.taskKind(id); check(this.attempt, 'Нет текущего сеанса.'); const t = this.sessionExam.tasks[id - 1], a = this.attempt;
+    M.taskKind(id); check(this.attempt && !this.attempt.sealed && this.sessionExam, 'Сеанс завершён. Ответы доступны учителю в защищённой работе.'); const t = this.sessionExam.tasks[id - 1], a = this.attempt;
     const saved = a.answers[id];
     return { ...this.publicExam({ ...this.sessionExam, tasks: [t] }).tasks[0],
       text: a.drafts[id] ?? saved?.text ?? '', savedText: saved?.text ?? '', savedAt: saved?.savedAt ?? null,
@@ -476,6 +645,27 @@ class ExamService {
   }
   async exportResults() {
     check(this.attempt?.status === 'finished', 'Экзамен ещё не завершён.');
+    const recipient=this.sessionExam?.resultRecipient || this.teacher.resultRecipient();
+    if(!this.attempt.sealed && !recipient && !this.allowLegacyResults) {
+      const message='Для защиты прежнего сеанса учитель должен один раз войти с паролем. Ответы сохранены; затем повторите экспорт.';
+      this.lastError=message;await this.commit(s=>{s.exportError=message;});return this.sessionView();
+    }
+    if(this.attempt.sealed || recipient) {
+      try {
+        if(!this.attempt.sealed)this.attempt=await ResultStorage.sealSession(this.attempt,this.sessionExam,this.attemptDir(),recipient);
+        else {this.attempt=await ResultStorage.readReceipt(this.attemptDir(),this.attempt.id);await ResultStorage.cleanupSession(this.attemptDir());}
+        this.attempt=await ResultStorage.publishReceipt(this.attempt,this.attemptDir(),this.resultsRoot);
+        this.sessionExam=null;
+      } catch(e) {
+        const message=e instanceof UserError?e.message:`Не удалось сохранить защищённую работу (${e.code || 'ошибка записи'}). Резервные данные сохранены; повторите экспорт.`;
+        // An interrupted cleanup must never cause a valid encrypted receipt to
+        // be replaced by a plaintext session checkpoint on the next retry.
+        try {this.attempt=await ResultStorage.readReceipt(this.attemptDir(),this.attempt.id);await ResultStorage.cleanupSession(this.attemptDir());}catch{}
+        if(this.attempt.sealed){this.attempt.archivePath=null;this.attempt.resultDir=null;this.sessionExam=null;}
+        this.lastError=message; await this.commit(s=>{s.exportError=message;}).catch(()=>{});
+      }
+      return this.sessionView();
+    }
     const a = clone(this.attempt), suffix = `${new Date(a.startedAt).toISOString().slice(0,10)}_${a.candidate.registration}_${a.id.slice(0,8)}`;
     let final = path.join(this.resultsRoot, `OGE_${suffix}`);
     if (fs.existsSync(final)) final += `_${crypto.randomUUID().slice(0,6)}`;

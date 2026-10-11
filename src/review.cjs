@@ -83,7 +83,7 @@ async function importResult(file, root, exam) {
     const context=zip.file('grading-context.json')?await entryJson(zip,'grading-context.json',entries):null;
     const contextMatch=context?contextMatches(context,exam):null;
     await fsp.copyFile(file,path.join(dir,'original-results.zip'));
-    const record={id,registration:person.registration,surname:person.surname,name:person.name,title:data.examTitle,
+    const record={id,sessionId:data.sessionId,registration:person.registration,surname:person.surname,name:person.name,title:data.examTitle,
       savedCount:Object.keys(answers).length,draftCount,contextMatch,answers:view,context,
       attempt:{answers}, originalSha256:digest(buffer), importedAt:new Date().toISOString()};
     await json(path.join(dir,'review.json'),record); return record;

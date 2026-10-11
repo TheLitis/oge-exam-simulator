@@ -111,7 +111,7 @@ async function instanceResponds(info) {
   });
 }
 
-async function startServer({ root, resultsRoot, open = true, port = 0, lock = true, clock, browserLauncher = openBrowser, folderLauncher = openFolder } = {}) {
+async function startServer({ root, resultsRoot, open = true, port = 0, lock = true, clock, browserLauncher = openBrowser, folderLauncher = openFolder, allowLegacyResults = false } = {}) {
   process.umask(0o077);
   const isolatedData = !!root;
   root ||= path.join(process.env.XDG_DATA_HOME || path.join(os.homedir(), '.local/share'), 'oge-exam-simulator');
@@ -140,7 +140,7 @@ async function startServer({ root, resultsRoot, open = true, port = 0, lock = tr
   }
   // Explicit --data runs stay isolated; normal desktop launches export to Documents.
   resultsRoot ||= isolatedData ? path.join(root, 'results') : await defaultResultsDirectory();
-  const service = new ExamService(root, { ...clock, resultsRoot });
+  const service = new ExamService(root, { ...clock, resultsRoot, allowLegacyResults });
   try { await service.init(); } catch (e) { if (lock) await fsp.rm(lockDir, { recursive: true, force: true }); throw e; }
   const key = crypto.randomBytes(32).toString('hex');
   let chain = Promise.resolve(), timer, base, browserFile, closing = false, uploads = 0;
@@ -195,7 +195,8 @@ async function startServer({ root, resultsRoot, open = true, port = 0, lock = tr
           await sendFile(res, asset.file, asset.isImage ? asset.mime : 'application/octet-stream', asset.isImage && url.searchParams.get('download') !== '1' ? null : asset.name); return;
         }
         if (url.pathname === '/api/package') { const file = await asTeacher(() => service.exportFile(url.searchParams.get('id'))); await sendFile(res, file, 'application/zip', 'exam.oge'); return; }
-        if (url.pathname === '/api/result') { const a = service.attempt; check(a?.status === 'finished' && a.archivePath, 'Итоговый ZIP пока недоступен.'); await sendFile(res, a.archivePath, 'application/zip', path.basename(a.archivePath)); return; }
+        if (url.pathname === '/api/result') { const a = await serial(()=>service.resultDownload()); await sendFile(res,a.file,a.encrypted?'application/octet-stream':'application/zip',path.basename(a.file));return; }
+        if (url.pathname === '/api/teacher/result-key') {const file=await asTeacher(()=>service.resultKeyBackup());await sendFile(res,file,'application/octet-stream','result-key.ogekeys');return;}
         if (url.pathname === '/api/review/report') {
           const report = await asTeacher(() => service.reviewReport(url.searchParams.get('id')));
           try { await sendFile(res, report.file || report, 'application/zip', 'reviewed-results.zip'); }
@@ -208,25 +209,26 @@ async function startServer({ root, resultsRoot, open = true, port = 0, lock = tr
       check(req.method === 'POST', 'Недопустимый метод.');
       if (url.pathname === '/api/upload') {
         const kind = url.searchParams.get('kind'), name = url.searchParams.get('name'); safeName(name);
-        check(['image', 'resource', 'answer', 'package', 'review'].includes(kind), 'Некорректный тип файла.');
+        check(['image', 'resource', 'answer', 'package', 'review','result-key'].includes(kind), 'Некорректный тип файла.');
         const editPackage = kind === 'package' && url.searchParams.get('edit') === '1';
-        const teacherUpload = ['image', 'resource', 'review'].includes(kind) || editPackage;
+        const teacherUpload = ['image', 'resource', 'review','result-key'].includes(kind) || editPackage;
         if (teacherUpload) requireTeacher();
         let projectPassword;
-        if (editPackage && req.headers['x-project-password'] !== undefined) {
+        if ((editPackage || kind==='result-key') && req.headers['x-project-password'] !== undefined) {
           const encoded = req.headers['x-project-password'];
           check(typeof encoded === 'string' && Buffer.byteLength(encoded) <= 1536, 'Некорректный пароль проекта.');
           try { projectPassword = decodeURIComponent(encoded); } catch { throw new UserError('Некорректный пароль проекта.'); }
           check(projectPassword.length > 0 && projectPassword.length <= 128 && !projectPassword.includes('\0'), 'Некорректный пароль проекта.');
         }
         check(uploads < 2, 'Дождитесь завершения предыдущей загрузки.');
-        const limit = editPackage ? PROJECT_LIMIT : ['package','review'].includes(kind) ? LIMITS.archive : kind === 'image' ? LIMITS.image : LIMITS.file;
+        const limit = kind==='result-key'?256*1024:kind==='review'?require('./result-protection.cjs').RESULT_LIMIT:editPackage ? PROJECT_LIMIT : kind==='package' ? LIMITS.archive : kind === 'image' ? LIMITS.image : LIMITS.file;
         if (req.headers['content-length']) check(Number(req.headers['content-length']) <= limit, 'Файл превышает допустимый размер.');
         uploads++; temp = path.join(root, 'incoming', crypto.randomUUID());
         try {
           await boundedCopy(req, temp, limit);
           const id = Number(url.searchParams.get('task'));
           const applyUpload = () => kind === 'package' ? service.importExam(temp, editPackage, projectPassword)
+            : kind==='result-key'?service.importResultKey(temp,projectPassword)
             : kind === 'review' ? service.importReview(temp)
             : kind === 'answer' ? service.attachFile(id, temp, name)
             : service.addEditorAsset(temp, name, id, kind, url.searchParams.get('auto') === '1');
@@ -270,7 +272,6 @@ async function startServer({ root, resultsRoot, open = true, port = 0, lock = tr
         case '/api/dismiss': result = await serial(() => service.dismissResult()); break;
         case '/api/open-folder': result = await serial(async () => {
           const ownResult=b.root!==true && service.attempt?.status==='finished' && service.attempt.resultDir;
-          if (!ownResult) requireTeacher();
           await folderLauncher(ownResult || service.resultsRoot); return true;
         }); break;
         case '/api/quit': check(b.confirm === true, 'Необходимо подтверждение.'); result = true; res.once('finish', () => setTimeout(() => close().catch(() => {}), 100)); break;
@@ -281,7 +282,7 @@ async function startServer({ root, resultsRoot, open = true, port = 0, lock = tr
       if (!res.headersSent && !res.destroyed) {
         const msg = e instanceof UserError ? e.message : e.code === 'ENOENT' ? 'Файл не найден. Проверьте, что он не был перемещён.' : `Не удалось выполнить действие (${e.code || 'ошибка данных'}). Сохранённые ответы не удалены.`;
         const error = { ok: false, error: msg };
-        if (e instanceof UserError && ['PROJECT_PASSWORD_REQUIRED', 'PROJECT_PASSWORD_INVALID'].includes(e.code)) error.code = e.code;
+        if (e instanceof UserError && ['PROJECT_PASSWORD_REQUIRED', 'PROJECT_PASSWORD_INVALID','RESULT_KEY_PASSWORD_REQUIRED','RESULT_KEY_PASSWORD_INVALID','RESULT_KEY_REQUIRED','RESULT_INVALID'].includes(e.code)) error.code = e.code;
         reply(res, error, e instanceof UserError ? e.status : 500);
       }
     } finally { if (temp) await fsp.rm(temp, { force: true }).catch(() => {}); }

@@ -3,7 +3,8 @@ const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const os = require('node:os');
 const { fsp, path, crypto, JSZip, hashFile, preflightZip } = require('../src/io.cjs');
-const { ExamService } = require('../src/service.cjs');
+const { ExamService } = require('./helpers/legacy-service.cjs');
+const { decryptBuffer } = require('../src/result-protection.cjs');
 const { SESSION_MS, PROJECT_OVERHEAD, isProtectedProject } = require('../src/teacher.cjs');
 const { ods } = require('./helpers/office-fixtures.cjs');
 const DEMO = path.join(__dirname, '../examples/demo.oge');
@@ -57,7 +58,9 @@ test('teacher setup encrypts current editor and backup; default state and restar
   await s.lockTeacher(); assert.equal(s.teacherAuthorized(token), false); assert.equal(noChecker(s.editor), true);
   await assert.rejects(s.setEditorChecker({ taskId: 1, checker: CHECKER }), e => e.status === 403);
   const restored = new ExamService(root, options); await restored.init();
-  assert.deepEqual(restored.state().teacher, { configured: true, unlocked: false });
+  const teacherState = restored.state().teacher;
+  assert.equal(teacherState.configured, true); assert.equal(teacherState.unlocked, false);
+  assert.equal(teacherState.resultProtection.ready, true); assert.match(teacherState.resultProtection.keyId, /^[a-f0-9]{64}$/);
   assert.equal(noChecker(restored.state({ teacherAccess: true })), true);
   const unlocked = await restored.unlockTeacher(PASSWORD); assert.notEqual(unlocked.token, token);
   assert.deepEqual(restored.state({ teacherAccess: restored.teacherAuthorized(unlocked.token) }).editor.tasks[0].checker, CHECKER);
@@ -203,7 +206,7 @@ test('encrypted portable project requires its source password on another install
   assert.deepEqual(target.s.editor.tasks[0].checker, CHECKER, 'a failed edit import preserves the unlocked editor');
 });
 
-test('published import and start auto-lock; pupil state, result ZIP and all lifecycle states contain no reference', async t => {
+test('published import and start auto-lock; pupil state, encrypted result and decrypted ZIP contain no reference', async t => {
   const { s, root, options } = await context(t); await s.configureTeacher(PASSWORD);
   const published = await s.exportExam(true), file = s.exportFile(published.id);
   const manifest = JSON.parse(await (await JSZip.loadAsync(await fsp.readFile(file))).file('manifest.json').async('string'));
@@ -215,7 +218,11 @@ test('published import and start auto-lock; pupil state, result ZIP and all life
   for (const action of [() => s.configureTeacher(PASSWORD), () => s.unlockTeacher(PASSWORD), () => s.updateEditor({ title: 'Closed' }), () => s.importReview(DEMO)])
     await assert.rejects(action());
   await s.saveAnswer(1, 'Student answer'); await s.finish();
-  const results = await JSZip.loadAsync(await fsp.readFile(s.attempt.archivePath));
+  const encrypted = await fsp.readFile(s.attempt.archivePath);
+  assert.equal(encrypted.includes(Buffer.from(MARKER)), false); assert.equal(encrypted.includes(Buffer.from('Student answer')), false);
+  await assert.rejects(JSZip.loadAsync(encrypted));
+  await s.unlockTeacher(PASSWORD);
+  const results = await JSZip.loadAsync(decryptBuffer(encrypted, s.teacher.resultPrivateKeys(), { purpose: 'results' }));
   for (const item of Object.values(results.files).filter(item => !item.dir))
     assert.equal((await item.async('nodebuffer')).includes(Buffer.from(MARKER)), false, item.name);
   assert.equal(noChecker(s.state()), true); await s.dismissResult(); assert.equal(noChecker(s.state()), true);
