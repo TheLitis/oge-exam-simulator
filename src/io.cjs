@@ -82,6 +82,10 @@ function preflightZip(buf, requiredName = 'manifest.json') {
     if (buf.readUInt32LE(i) === 0x06054b50 && i + 22 + buf.readUInt16LE(i + 20) === buf.length) { eocd = i; break; }
   }
   check(eocd >= 0, 'Не найден каталог ZIP.');
+  // JSZip selects the last raw EOCD signature. The package format has no ZIP
+  // comment, and both parsers must select the same record before any inflation.
+  check(buf.readUInt16LE(eocd + 20) === 0, 'Комментарии ZIP не поддерживаются.');
+  check(buf.lastIndexOf(Buffer.from([0x50, 0x4b, 0x05, 0x06])) === eocd, 'Неоднозначный каталог ZIP.');
   const count = buf.readUInt16LE(eocd + 10), start = buf.readUInt32LE(eocd + 16), size = buf.readUInt32LE(eocd + 12);
   check(buf.readUInt16LE(eocd + 4) === 0 && buf.readUInt16LE(eocd + 6) === 0 && buf.readUInt16LE(eocd + 8) === count, 'Многотомные ZIP не поддерживаются.');
   check(count > 0 && count <= LIMITS.entries && start !== 0xffffffff && start + size === eocd, 'Некорректный каталог или слишком много файлов.');

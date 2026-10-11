@@ -63,6 +63,12 @@ test('Linux sandbox enforces filesystem, network, process and execution limits',
       const result = await runCode({ language: 'python', source: 'raise ValueError("student failure")' });
       assert.equal(result.status, 'error'); assert.equal(result.reason, 'runtime'); assert.match(result.stderr, /student failure/);
     });
+    await t.test('unused kernel IPC operations are denied before argument handling', async () => {
+      // Invalid IDs/pointers and no creation flags: this check allocates no IPC objects.
+      const source = 'import ctypes,errno\nlibc=ctypes.CDLL(None,use_errno=True)\nlibc.syscall.restype=ctypes.c_long\nfor nr in [29,30,31,64,65,66,67,68,69,70,71,220,240,241,242,243,244,245]:\n ctypes.set_errno(0)\n result=libc.syscall(nr,ctypes.c_long(-1),0,0,0,0,0)\n assert result==-1 and ctypes.get_errno()==errno.EPERM, (nr,result,ctypes.get_errno())\nprint("blocked")\n';
+      const result = await runCode({ language: 'python', source });
+      assert.equal(result.status, 'ok', JSON.stringify(result)); assert.equal(result.stdout, 'blocked\n');
+    });
     await t.test('infinite loops time out and a subsequent run succeeds', async () => {
       const result = await runCode({ language: 'python', source: 'while True: pass' });
       assert.equal(result.status, 'timeout', JSON.stringify(result)); assert.ok(result.durationMs < LIMITS.wallMs + 2500);

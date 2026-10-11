@@ -59,6 +59,9 @@ function seccompFilter() {
   for (const nr of [41,42,43,44,45,46,47,48,49,50,57,58,101,109,112,
     155,161,165,166,167,168,169,175,176,246,248,249,250,272,288,298,299,
     307,308,310,311,313,320,321,323,425,426,427,428,429,430,431,432,438,442]) deny(nr);
+  // IPC namespaces isolate names, but RLIMIT_AS does not bound kernel objects.
+  // Neither runtime needs SysV IPC or POSIX message queues for these exercises.
+  for (const nr of [29,30,31,64,65,66,67,68,69,70,71,220,240,241,242,243,244,245]) deny(nr);
   add(0x15, 0, 1, 435); ret(0x00050026); // clone3: ENOSYS, libc falls back to clone.
   add(0x15, 0, 4, 53); // Anonymous AF_UNIX socketpairs for runtime message ports.
   load(16); add(0x15, 1, 0, 1); ret(0x00050001); ret(0x7fff0000);

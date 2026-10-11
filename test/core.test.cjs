@@ -146,6 +146,19 @@ test('demo package imports, all assets match SHA256 and public state hides secre
   assert.equal(JSON.stringify(s.state()).includes('"hash"'),false);
   assert.equal(JSON.stringify(s.state()).includes('DEMO-2026'),false);
 });
+test('generated package roundtrip uses one comment-free ZIP directory', async t => {
+  const {root}=await context(t,false); const file=path.join(root,'roundtrip.oge'), dest=path.join(root,'unpack');
+  await I.writeZip([{name:'manifest.json',data:'{"title":"Тест"}'}],file);
+  const data=await fsp.readFile(file); assert.deepEqual(I.preflightZip(data),[{name:'manifest.json',size:Buffer.byteLength('{"title":"Тест"}') }]);
+  assert.deepEqual(await I.extractPackage(file,dest),{title:'Тест'});
+});
+test('ordinary ZIP comments are rejected before package extraction', async t => {
+  const {root}=await context(t,false); const file=path.join(root,'comment.oge'), dest=path.join(root,'unpack');
+  const data=await zipData([['manifest.json','{}']],{comment:'An ordinary archive note'});
+  assert.throws(()=>I.preflightZip(data),/Комментарии ZIP/);
+  await fsp.writeFile(file,data); await assert.rejects(I.extractPackage(file,dest),/Комментарии ZIP/);
+  await assert.rejects(fsp.access(dest));
+});
 test('package path traversal is rejected before extraction', async t => {
   const {root}=await context(t,false); const file=path.join(root,'evil.zip');
   await fsp.writeFile(file,await zipData([['manifest.json','{}'],['../escape','no']]));
